@@ -52,11 +52,12 @@ tsx index.ts --ocr
 ```
 
 1. **Captura periódica** da janela do sistema e OCR (`tesseract.js`, idiomas `por+eng`).
-2. Extrai candidatos de **2 a 5 letras seguidas** do texto reconhecido e escolhe a sequência que melhor coincide com palavras do dicionário (prioridade pela frequência no corpus).
+2. Extrai candidatos de **2 a 5 letras seguidas** do texto reconhecido e escolhe a sequência que permita a **palavra mais longa** no dicionário (empates pela frequência no corpus).
 3. **Teclas** (com debounce para evitar repetição por auto-repeat):
    - **`s`** — força um ciclo já e guarda screenshot de debug na pasta `debug/ocr/` (recorte correto quando há região definida); tenta abrir no Preview.
    - **`r`** — abre overlay Swift para **desenhar ou ajustar a região** da captura na **tela principal**.
    - **`a`** — volta a OCR na **tela inteira**.
+   - **`t`** *(macOS)* — envia **exatamente** o texto da linha **Melhor candidato** (`→ …`) como **digitação simulada** (sem clipboard nem Cmd+V): intervalos aleatórios, hesitações, por vezes **letra errada + backspace + certo**, por vezes **apaga um sufixo e redigita**, raramente **apaga tudo e recomeça**. Ajusta `OCR_TYPING_TYPO_*`, `OCR_TYPING_REDO_*`, `OCR_TYPING_RESTART_FROM_SCRATCH_CHANCE`, `OCR_KEYSTROKE_GAP_*`, etc. Exige **Acessibilidade** para o Terminal ou Cursor (além da gravação de ecrã).
    - **Ctrl+C** — termina.
 
 **Região e Retina:** o overlay guarda coordenadas em **pontos** (como no macOS); o PNG da captura está em **pixels**. O código converte usando `screenWidth` / `screenHeight` exportados pelo overlay (e um helper Swift para entrada manual), para o recorte coincidir com a zona escolhida.
@@ -74,13 +75,18 @@ Na **primeira execução** com rede disponível, os dois ficheiros são descarre
 
 ### Como são ordenadas as sugestões
 
-- **Melhor candidato** e lista seguinte: por **contagem no corpus** (maior frequência primeiro). Palavras só no dicionário e absentes do corpus aparecem como “fora do corpus”.
+- **Melhor candidato** e lista seguinte: primeiro **comprimento** (palavra mais longa que **contém** a sequência como substring — máxima extensão no dicionário); em empate, maior **frequência no corpus**. Assim evitas ficar preso a palavras curtíssimas só porque são muito usadas nas legendas.
+
+No OCR, o texto lido serve só como **“raiz” / sílabas pedidas**: não há análise morfológica; cruzamos essas letras com o dicionário inteiro.
+
 - **Top pontuação**: ordenação por **pontos tipo Scrabble BR** (`LETTER_POINTS` no código), útil quando o jogo valoriza letras difíceis — independentemente da frequência na língua.
 
 ### Limitações do dicionário e filtros
 
-- Apenas palavras **simples**: sem `-`, espaços ou `'`.
-- **Comprimento máximo:** 8 letras (`MAX_WORD_LENGTH`).
+- Controlas `-` e `'` em separado em `index.ts`: **`ALLOW_HYPHEN_IN_LEXEME`** (ex.: `beija-flores`) e **`ALLOW_APOSTROPHE_IN_LEXEME`** (ex.: `d'água`). Com **ambos** a `false`, só entram palavras **contínuas** (só letras Unicode). Com **ambos** a `true`, podes misturar os dois tipos de ligação na mesma entrada.
+- **Comprimento máximo:** 64 caracteres por entrada (`MAX_WORD_LENGTH`).
+- **Espaços** continuam sempre excluídos.
+
 - O matching usa **maiúsculas** na substring; acentos são tratados onde faz sentido para cruzar com o corpus (normalização para lookup).
 
 ## Scripts Swift (`scripts/`)
@@ -132,4 +138,4 @@ Usa esta ferramenta de forma responsável nos jogos que jogares (respeita as reg
 
 ---
 
-**Resumo:** `palavras-cli` existe para **ganhar tempo** a encontrar palavras válidas em PT com uma sequência obrigatória, priorizando **o que mais aparece em uso real medido por corpus público**, com modo opcional **OCR no macOS** para ler o prompt diretamente do ecrã.
+**Resumo:** `palavras-cli` existe para **ganhar tempo** a encontrar palavras válidas em PT com uma sequência obrigatória, priorizando **palavras mais longas no dicionário** e usando o corpus só para **desempatar**, com modo opcional **OCR no macOS** para ler o prompt diretamente do ecrã.

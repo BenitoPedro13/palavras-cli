@@ -7,6 +7,7 @@ freq-pt-opensubtitles-full.txt
 
 # Screenshots / OCR debug
 debug/
+ocr-region.json
 
 # Logs e ferramentas
 *.log

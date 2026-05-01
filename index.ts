@@ -16,11 +16,43 @@ const FREQUENCY_URL =
   "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/pt/pt_full.txt";
 const FREQUENCY_CACHE_PATH = path.resolve(process.cwd(), "freq-pt-opensubtitles-full.txt");
 const MAX_RESULTS = 5;
-const MAX_WORD_LENGTH = 8;
-const OCR_POLL_MS = 1800;
+/** Comprimento máximo de cada entrada do dicionário. */
+const MAX_WORD_LENGTH = 15;
+/** Permite hífen entre grupos de letras (ex.: beija-flores). */
+const ALLOW_HYPHEN_IN_LEXEME = false;
+/** Permite apóstrofo entre grupos de letras (ex.: d'água). */
+const ALLOW_APOSTROPHE_IN_LEXEME = true;
+const OCR_POLL_MS = 500;
 const OCR_CHECK_INTERVAL_MS = 120;
 const OCR_HOTKEY_DEBOUNCE_MS = 250;
+/** Pausa média antes de começar a digitar (para focares o campo do jogo). */
+const OCR_PASTE_DELAY_MS = 500;
+/** Variação aleatória ± este valor na pausa inicial (mais natural). */
+const OCR_TYPING_FOCUS_JITTER_MS = 280;
+/** Pausa mínima aleatória entre carateres. */
+const OCR_KEYSTROKE_GAP_MS_MIN = 100;
+/** Pausa máxima aleatória entre carateres. */
+const OCR_KEYSTROKE_GAP_MS_MAX = 130;
+/** Probabilidade de uma hesitação extra entre duas teclas (pausa mais longa). */
+const OCR_TYPING_HESITATION_CHANCE = 0.07;
+const OCR_TYPING_HESITATION_MS_MIN = 110;
+const OCR_TYPING_HESITATION_MS_MAX = 480;
+/** Probabilidade de carácter errado antes do certo (só letras); corrige com backspace. */
+const OCR_TYPING_TYPO_CHANCE = 0.038;
+const OCR_TYPING_TYPO_PAUSE_MS_MIN = 42;
+const OCR_TYPING_TYPO_PAUSE_MS_MAX = 210;
+/** Probabilidade de apagar os últimos N carateres e voltar a escrevê-los. */
+const OCR_TYPING_REDO_SUFFIX_CHANCE = 0.022;
+/** Máximo de carateres a apagar ao refazer um sufixo (mínimo efectivo 2). */
+const OCR_TYPING_REDO_SUFFIX_MAX = 7;
+/** Pausa entre backspaces ao apagar. */
+const OCR_TYPING_BACKSPACE_GAP_MS_MIN = 26;
+const OCR_TYPING_BACKSPACE_GAP_MS_MAX = 88;
+/** Probabilidade rara de apagar a palavra toda já escrita e digitar outra vez desde o início. */
+const OCR_TYPING_RESTART_FROM_SCRATCH_CHANCE = 0.009;
 const OCR_DEBUG_DIR = path.resolve(process.cwd(), "debug", "ocr");
+/** Preferência local da última região OCR (modo overlay/manual); não versionado por defeito. */
+const OCR_REGION_SAVE_PATH = path.resolve(process.cwd(), "ocr-region.json");
 const OVERLAY_SCRIPT_PATH = path.resolve(process.cwd(), "scripts/ocr_region_overlay.swift");
 const MAIN_SCREEN_POINTS_SCRIPT_PATH = path.resolve(
   process.cwd(),
@@ -65,8 +97,49 @@ function normalizeLetters(value: string): string {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
-function isSimpleWord(word: string): boolean {
-  return /^[A-Za-zÀ-ÖØ-öø-ÿ]+$/u.test(word);
+/** Uma só palavra: só letras Unicode, sem `-` nem `'`. */
+function isSimpleWordLexeme(word: string): boolean {
+  return /^[\p{L}]+$/u.test(word);
+}
+
+/** Composto conforme constantes `ALLOW_HYPHEN_IN_LEXEME` / `ALLOW_APOSTROPHE_IN_LEXEME`. Sem espaços. */
+function isCompoundLexemeByFlags(word: string): boolean {
+  if (word.includes(" ") || word.includes("--")) {
+    return false;
+  }
+
+  const hyp = ALLOW_HYPHEN_IN_LEXEME;
+  const apo = ALLOW_APOSTROPHE_IN_LEXEME;
+
+  if (hyp && apo) {
+    return /^[\p{L}]+(?:[-'][\p{L}]+)*$/u.test(word);
+  }
+
+  if (hyp && !apo) {
+    if (word.includes("'")) {
+      return false;
+    }
+
+    return /^[\p{L}]+(?:-[\p{L}]+)*$/u.test(word);
+  }
+
+  if (!hyp && apo) {
+    if (word.includes("-")) {
+      return false;
+    }
+
+    return /^[\p{L}]+(?:'[\p{L}]+)*$/u.test(word);
+  }
+
+  return isSimpleWordLexeme(word);
+}
+
+function isAllowedLexeme(word: string): boolean {
+  if (!ALLOW_HYPHEN_IN_LEXEME && !ALLOW_APOSTROPHE_IN_LEXEME) {
+    return isSimpleWordLexeme(word);
+  }
+
+  return isCompoundLexemeByFlags(word);
 }
 
 function getWordPoints(word: string): number {
@@ -160,15 +233,130 @@ function getCorpusFrequency(word: string, freqMap: Map<string, number>): number 
   return freqMap.get(frequencyLookupKey(word)) ?? 0;
 }
 
-function sortMatchesByCorpus(matches: string[], freqMap: Map<string, number>): string[] {
+/**
+ * Para jogar: prioriza palavras mais longas que contêm a sequência (máxima extensão no dicionário);
+ * entre empates, prefere maior frequência no corpus.
+ */
+function sortMatchesByLengthThenCorpus(
+  matches: string[],
+  freqMap: Map<string, number>
+): string[] {
   return [...matches].sort((a, b) => {
-    const diff = getCorpusFrequency(b, freqMap) - getCorpusFrequency(a, freqMap);
-    if (diff !== 0) {
-      return diff;
+    const lenDiff = b.length - a.length;
+    if (lenDiff !== 0) {
+      return lenDiff;
+    }
+
+    const freqDiff = getCorpusFrequency(b, freqMap) - getCorpusFrequency(a, freqMap);
+    if (freqDiff !== 0) {
+      return freqDiff;
     }
 
     return a.localeCompare(b, "pt-BR");
   });
+}
+
+type LengthTier = "short" | "medium" | "long";
+
+/** Pesos relativos ao escolher faixa de comprimento (modo OCR “humano”). */
+const LENGTH_TIER_WEIGHTS: Record<LengthTier, number> = {
+  short: 0.18,
+  medium: 0.32,
+  long: 0.5,
+};
+
+function lengthTierForWord(len: number, minLen: number, maxLen: number): LengthTier {
+  if (maxLen <= minLen) {
+    return "medium";
+  }
+
+  const span = maxLen - minLen || 1;
+  const t = (len - minLen) / span;
+  if (t < 1 / 3) {
+    return "short";
+  }
+
+  if (t < 2 / 3) {
+    return "medium";
+  }
+
+  return "long";
+}
+
+function bucketMatchesByLengthTier(matches: string[]): Record<LengthTier, string[]> {
+  const buckets: Record<LengthTier, string[]> = { short: [], medium: [], long: [] };
+  const lengths = matches.map((w) => w.length);
+  const minLen = Math.min(...lengths);
+  const maxLen = Math.max(...lengths);
+
+  for (const w of matches) {
+    buckets[lengthTierForWord(w.length, minLen, maxLen)].push(w);
+  }
+
+  return buckets;
+}
+
+function sortMatchesByCorpusThenLocale(matches: string[], freqMap: Map<string, number>): string[] {
+  return [...matches].sort((a, b) => {
+    const freqDiff = getCorpusFrequency(b, freqMap) - getCorpusFrequency(a, freqMap);
+    if (freqDiff !== 0) {
+      return freqDiff;
+    }
+
+    return a.localeCompare(b, "pt-BR");
+  });
+}
+
+/** Lista já ordenada por corpus; escolhe ao acaso uma das primeiras até `poolMax` entradas. */
+function pickRandomFromCorpusWeightedPool(sortedByCorpus: string[], poolMax: number): string {
+  const n = sortedByCorpus.length;
+  const poolSize = Math.min(poolMax, n);
+  const idx = Math.floor(Math.random() * poolSize);
+  return sortedByCorpus[idx];
+}
+
+function weightedRandomAmongTiers(nonEmptyTiers: LengthTier[]): LengthTier {
+  let sum = 0;
+  const weights: number[] = [];
+
+  for (const tier of nonEmptyTiers) {
+    const w = LENGTH_TIER_WEIGHTS[tier];
+    weights.push(w);
+    sum += w;
+  }
+
+  let r = Math.random() * sum;
+  for (let i = 0; i < nonEmptyTiers.length; i++) {
+    r -= weights[i];
+    if (r <= 0) {
+      return nonEmptyTiers[i];
+    }
+  }
+
+  return nonEmptyTiers[nonEmptyTiers.length - 1];
+}
+
+/**
+ * Classifica matches por comprimento relativo (terços entre min e max neste conjunto),
+ * escolhe uma faixa com pesos fixos e dentro dela uma palavra ao acaso entre as mais frequentes no corpus.
+ */
+function pickPlayWordHumanTiered(
+  matches: string[],
+  freqMap: Map<string, number>
+): { word: string; tier: LengthTier } {
+  if (matches.length === 1) {
+    return { word: matches[0], tier: "medium" };
+  }
+
+  const buckets = bucketMatchesByLengthTier(matches);
+  const tierOrder: LengthTier[] = ["short", "medium", "long"];
+  const nonEmpty = tierOrder.filter((t) => buckets[t].length > 0);
+
+  const tier =
+    nonEmpty.length === 1 ? nonEmpty[0] : weightedRandomAmongTiers(nonEmpty);
+  const ranked = sortMatchesByCorpusThenLocale(buckets[tier], freqMap);
+
+  return { word: pickRandomFromCorpusWeightedPool(ranked, 5), tier };
 }
 
 function findMatchingWords(words: string[], sequence: string): string[] {
@@ -177,14 +365,12 @@ function findMatchingWords(words: string[], sequence: string): string[] {
 
   for (const word of words) {
     const normalizedWord = normalize(word);
-    const hasCompoundSeparator =
-      word.includes("-") || word.includes(" ") || word.includes("'");
 
     if (!normalizedWord.includes(normalizedSequence)) {
       continue;
     }
 
-    if (word.length > MAX_WORD_LENGTH || hasCompoundSeparator || !isSimpleWord(word)) {
+    if (word.length > MAX_WORD_LENGTH || !isAllowedLexeme(word)) {
       continue;
     }
 
@@ -192,6 +378,121 @@ function findMatchingWords(words: string[], sequence: string): string[] {
   }
 
   return matches.sort((a, b) => b.length - a.length || a.localeCompare(b, "pt-BR"));
+}
+
+/** Simula digitação real carácter a carácter (sem clipboard nem Cmd+V). macOS / JXA. */
+async function typeRecommendedWordIntoFocusedApp(word: string): Promise<void> {
+  if (process.platform !== "darwin") {
+    throw new Error("Digitação simulada só está disponível no macOS.");
+  }
+
+  const focusMs = Math.round(
+    Math.max(
+      450,
+      OCR_PASTE_DELAY_MS + (Math.random() * 2 - 1) * OCR_TYPING_FOCUS_JITTER_MS
+    )
+  );
+
+  console.log(
+    `\nEm ~${(focusMs / 1000).toFixed(1)}s começa a digitação — foca já o campo de texto do ` +
+      `jogo. (Privacidade e segurança → Acessibilidade para o Terminal ou Cursor.)`
+  );
+  await new Promise((resolve) => setTimeout(resolve, focusMs));
+
+  const gapMin = OCR_KEYSTROKE_GAP_MS_MIN;
+  const gapMax = OCR_KEYSTROKE_GAP_MS_MAX;
+  const hesitateChance = OCR_TYPING_HESITATION_CHANCE;
+  const hesitateMin = OCR_TYPING_HESITATION_MS_MIN;
+  const hesitateMax = OCR_TYPING_HESITATION_MS_MAX;
+  const typoChance = OCR_TYPING_TYPO_CHANCE;
+  const typoPauseMin = OCR_TYPING_TYPO_PAUSE_MS_MIN;
+  const typoPauseMax = OCR_TYPING_TYPO_PAUSE_MS_MAX;
+  const redoSuffixChance = OCR_TYPING_REDO_SUFFIX_CHANCE;
+  const redoSuffixMax = OCR_TYPING_REDO_SUFFIX_MAX;
+  const bsGapMin = OCR_TYPING_BACKSPACE_GAP_MS_MIN;
+  const bsGapMax = OCR_TYPING_BACKSPACE_GAP_MS_MAX;
+  const restartChance = OCR_TYPING_RESTART_FROM_SCRATCH_CHANCE;
+
+  const script = `
+    function sleepMs(ms) {
+      var end = Date.now() + ms;
+      while (Date.now() < end) {}
+    }
+    function randInt(a, b) {
+      return Math.floor(Math.random() * (b - a + 1)) + a;
+    }
+    var se = Application('System Events');
+    function backspaceOnce() {
+      se.keyCode(51);
+    }
+    function pauseBetweenKeys() {
+      var pause = randInt(${gapMin}, ${gapMax});
+      if (Math.random() < ${hesitateChance}) {
+        pause += randInt(${hesitateMin}, ${hesitateMax});
+      }
+      sleepMs(pause);
+    }
+    function randomWrongLetter(ch) {
+      var pool = "AEIOUBCDFGHJKLMNPQRSTUVWXYZ";
+      var chUp = ch.toUpperCase();
+      var wantUpper = ch === chUp;
+      var pick = chUp;
+      var guard = 0;
+      while (pick === chUp && guard++ < 24) {
+        pick = pool.charAt(randInt(0, pool.length - 1));
+      }
+      return wantUpper ? pick : pick.toLowerCase();
+    }
+    function isLetterLike(ch) {
+      return /^\\p{L}$/u.test(ch);
+    }
+    function maybeTypoThenCorrect(ch) {
+      if (${typoChance} > 0 && isLetterLike(ch) && Math.random() < ${typoChance}) {
+        se.keystroke(randomWrongLetter(ch));
+        sleepMs(randInt(${typoPauseMin}, ${typoPauseMax}));
+        backspaceOnce();
+        sleepMs(randInt(${typoPauseMin}, ${typoPauseMax}));
+      }
+      se.keystroke(ch);
+    }
+    var s = ${JSON.stringify(word)};
+    var i = 0;
+    for (i = 0; i < s.length; i++) {
+      if (i >= 7 && ${restartChance} > 0 && Math.random() < ${restartChance}) {
+        var rb = 0;
+        for (rb = 0; rb < i; rb++) {
+          backspaceOnce();
+          sleepMs(randInt(${bsGapMin}, ${bsGapMax}));
+        }
+        sleepMs(randInt(${hesitateMin}, ${hesitateMax}));
+        var rj = 0;
+        for (rj = 0; rj < i; rj++) {
+          maybeTypoThenCorrect(s.charAt(rj));
+          if (rj < i - 1) pauseBetweenKeys();
+        }
+        pauseBetweenKeys();
+      }
+      if (i >= 4 && ${redoSuffixChance} > 0 && Math.random() < ${redoSuffixChance}) {
+        var redoLen = randInt(2, Math.min(${redoSuffixMax}, i));
+        var bk = 0;
+        for (bk = 0; bk < redoLen; bk++) {
+          backspaceOnce();
+          sleepMs(randInt(${bsGapMin}, ${bsGapMax}));
+        }
+        sleepMs(randInt(75, 260));
+        var jj = 0;
+        for (jj = i - redoLen; jj < i; jj++) {
+          maybeTypoThenCorrect(s.charAt(jj));
+          if (jj < i - 1) pauseBetweenKeys();
+        }
+        pauseBetweenKeys();
+      }
+      maybeTypoThenCorrect(s.charAt(i));
+      if (i < s.length - 1) pauseBetweenKeys();
+    }
+  `;
+
+  await execFileAsync("osascript", ["-l", "JavaScript", "-e", script]);
 }
 
 function highlightSequence(word: string, sequence: string): string {
@@ -207,41 +508,73 @@ function highlightSequence(word: string, sequence: string): string {
   return `${word.slice(0, start)}-${upperSequence}-${word.slice(end)}`;
 }
 
-function printResult(words: string[], sequence: string, freqMap: Map<string, number>): void {
+type PrintResultOptions = {
+  /** Modo OCR: escolha variada entre faixas curtas/médias/longas (relativo ao conjunto de matches). */
+  humanTierWordPick?: boolean;
+};
+
+/** Devolve exatamente o texto da recomendação principal (maiúsculas, como na linha `→`), ou null se não houver matches. */
+function printResult(
+  words: string[],
+  sequence: string,
+  freqMap: Map<string, number>,
+  options?: PrintResultOptions
+): string | null {
   const matches = findMatchingWords(words, sequence);
   const sequenceUpper = normalize(sequence);
 
   if (matches.length === 0) {
     console.log(`Nenhuma palavra encontrada com a sequência "${sequenceUpper}"`);
-    return;
+    return null;
   }
 
   console.log(`Sequência: ${sequenceUpper}`);
   console.log(`Encontradas: ${matches.length} palavra(s)\n`);
 
-  const byCorpus = sortMatchesByCorpus(matches, freqMap);
-  const pick = byCorpus[0];
+  const sortedForPlay = sortMatchesByLengthThenCorpus(matches, freqMap);
+
+  let pick: string;
+  let criterionNote: string;
+
+  if (options?.humanTierWordPick) {
+    const { word, tier } = pickPlayWordHumanTiered(matches, freqMap);
+    pick = word;
+    const tierPt =
+      tier === "short"
+        ? "faixa curta"
+        : tier === "medium"
+          ? "faixa média"
+          : "faixa longa";
+    criterionNote =
+      `modo OCR (mais natural): entre os comprimentos possíveis para esta sequência foi sorteada a ${tierPt}; ` +
+      `dentro dela, palavra aleatória entre as ~5 mais frequentes no corpus`;
+  } else {
+    pick = sortedForPlay[0];
+    criterionNote =
+      "palavra mais longa no dicionário que contém a sequência; empate por uso no corpus — FrequencyWords / legendas PT";
+  }
+
+  const pickShown = normalize(pick);
   const pickFreq = getCorpusFrequency(pick, freqMap);
 
+  console.log(`Melhor candidato (${criterionNote}):`);
   console.log(
-    "Melhor candidato por uso em português falado (corpus de legendas OpenSubtitles, FrequencyWords 2018):"
-  );
-  console.log(
-    `→ ${normalize(pick)} (${highlightSequence(pick, sequenceUpper)}) — ` +
+    `→ ${pickShown} (${highlightSequence(pick, sequenceUpper)}) — ` +
+      `${pick.length} letras` +
       (pickFreq > 0
-        ? `~${pickFreq.toLocaleString("pt-BR")} ocorrências no corpus`
-        : "sem ocorrência no corpus (palavra rara ou só no dicionário)")
+        ? `; ~${pickFreq.toLocaleString("pt-BR")} no corpus`
+        : "; sem ocorrência no corpus")
   );
 
-  const restByCorpus = byCorpus.slice(1, MAX_RESULTS);
-  if (restByCorpus.length > 0) {
-    console.log("\nOutras opções pelo mesmo critério:");
-    for (const word of restByCorpus) {
+  const restForPlay = sortedForPlay.filter((w) => w !== pick).slice(0, MAX_RESULTS);
+  if (restForPlay.length > 0) {
+    console.log("\nOutras opções pelo mesmo critério (comprimento, depois corpus):");
+    for (const word of restForPlay) {
       const f = getCorpusFrequency(word, freqMap);
       const freqLabel =
         f > 0 ? `~${f.toLocaleString("pt-BR")} no corpus` : "fora do corpus";
       console.log(
-        `- ${normalize(word)} (${highlightSequence(word, sequenceUpper)}) — ${freqLabel}`
+        `- ${normalize(word)} (${highlightSequence(word, sequenceUpper)}) — ${word.length} letras; ${freqLabel}`
       );
     }
   }
@@ -263,6 +596,8 @@ function printResult(words: string[], sequence: string, freqMap: Map<string, num
       `- ${normalize(word)} (${highlightSequence(word, sequenceUpper)}) — ${getWordPoints(word)} pontos`
     );
   }
+
+  return pickShown;
 }
 
 function extractCandidateSequences(text: string): string[] {
@@ -291,9 +626,13 @@ function chooseBestSequence(
       continue;
     }
 
-    const topWord = sortMatchesByCorpus(matches, freqMap)[0];
+    const topWord = sortMatchesByLengthThenCorpus(matches, freqMap)[0];
     const freq = getCorpusFrequency(topWord, freqMap);
-    const score = freq * 1_000_000 + matches.length * 100 + getWordPoints(topWord);
+    const score =
+      topWord.length * 1e15 +
+      freq * 1_000_000 +
+      matches.length * 100 +
+      getWordPoints(topWord);
     if (score > bestScore) {
       bestScore = score;
       best = candidate;
@@ -322,6 +661,65 @@ type OcrRegion = {
 
 function formatRegion(region: OcrRegion): string {
   return `left=${region.left}, top=${region.top}, width=${region.width}, height=${region.height}`;
+}
+
+function parseSavedOcrRegion(data: unknown): OcrRegion | null {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+
+  const o = data as Record<string, unknown>;
+  const left = Math.round(Number(o.left));
+  const top = Math.round(Number(o.top));
+  const width = Math.round(Number(o.width));
+  const height = Math.round(Number(o.height));
+
+  const nums = [left, top, width, height];
+  if (!nums.every((n) => Number.isFinite(n) && n >= 0)) {
+    return null;
+  }
+
+  if (width <= 0 || height <= 0) {
+    return null;
+  }
+
+  const region: OcrRegion = { left, top, width, height };
+  const sw = Number(o.screenWidth);
+  const sh = Number(o.screenHeight);
+  if (Number.isFinite(sw) && Number.isFinite(sh) && sw > 0 && sh > 0) {
+    region.screenWidth = Math.round(sw);
+    region.screenHeight = Math.round(sh);
+  }
+
+  return region;
+}
+
+function loadSavedOcrRegion(): OcrRegion | null {
+  try {
+    if (!fs.existsSync(OCR_REGION_SAVE_PATH)) {
+      return null;
+    }
+
+    const raw = JSON.parse(fs.readFileSync(OCR_REGION_SAVE_PATH, "utf8")) as unknown;
+    return parseSavedOcrRegion(raw);
+  } catch {
+    return null;
+  }
+}
+
+function persistOcrRegion(region: OcrRegion | null): void {
+  try {
+    if (!region) {
+      if (fs.existsSync(OCR_REGION_SAVE_PATH)) {
+        fs.unlinkSync(OCR_REGION_SAVE_PATH);
+      }
+      return;
+    }
+
+    fs.writeFileSync(OCR_REGION_SAVE_PATH, `${JSON.stringify(region)}\n`, "utf8");
+  } catch {
+    /* disco só de leitura ou permissões */
+  }
 }
 
 async function readMainScreenPoints(): Promise<{ width: number; height: number } | null> {
@@ -594,16 +992,35 @@ async function runOcrMode(words: string[], freqMap: Map<string, number>): Promis
   console.log("- s: forcar screenshot imediato");
   console.log("- r: abrir overlay para selecionar/redimensionar regiao");
   console.log("- a: voltar para tela inteira");
+  console.log("- t: digitar a ultima recomendacao no campo focado (macOS; sem Cmd+V — ver aviso no terminal)");
   console.log("- Ctrl+C: encerrar\n");
+
+  const loadedRegion = loadSavedOcrRegion();
+  let activeRegion: OcrRegion | null = loadedRegion;
+  if (loadedRegion) {
+    const enriched = await withScreenDimensions(loadedRegion);
+    if (
+      enriched.screenWidth !== loadedRegion.screenWidth ||
+      enriched.screenHeight !== loadedRegion.screenHeight
+    ) {
+      persistOcrRegion(enriched);
+    }
+
+    activeRegion = enriched;
+    console.log(
+      `Regiao OCR restaurada (${path.basename(OCR_REGION_SAVE_PATH)}): ${formatRegion(activeRegion)}`
+    );
+    console.log("");
+  }
 
   const worker: Worker = await createWorker("por+eng");
   let lastBestSequence = "";
-  let activeRegion: OcrRegion | null = null;
   let forceScreenshot = true;
   let isConfiguringRegion = false;
   let shouldStop = false;
   let manualScreenshotRequested = false;
-  const hotkeyLastAt: Partial<Record<"s" | "a" | "r", number>> = {};
+  let lastRecommendedWord: string | null = null;
+  const hotkeyLastAt: Partial<Record<"s" | "a" | "r" | "t", number>> = {};
 
   readline.emitKeypressEvents(process.stdin);
   if (process.stdin.isTTY) {
@@ -612,7 +1029,7 @@ async function runOcrMode(words: string[], freqMap: Map<string, number>): Promis
   process.stdin.resume();
 
   const keypressHandler = (_str: string, key: readline.Key) => {
-    const isDebouncedHotkey = (hotkey: "s" | "a" | "r"): boolean => {
+    const isDebouncedHotkey = (hotkey: "s" | "a" | "r" | "t"): boolean => {
       const now = Date.now();
       const lastAt = hotkeyLastAt[hotkey] ?? 0;
       if (now - lastAt < OCR_HOTKEY_DEBOUNCE_MS) {
@@ -642,8 +1059,31 @@ async function runOcrMode(words: string[], freqMap: Map<string, number>): Promis
         return;
       }
       activeRegion = null;
+      persistOcrRegion(null);
       forceScreenshot = true;
       console.log("\nOCR configurado para usar tela inteira.");
+      return;
+    }
+
+    if (key.name === "t") {
+      if (isDebouncedHotkey("t")) {
+        return;
+      }
+      const toPaste = lastRecommendedWord;
+      if (!toPaste) {
+        console.log("\nAinda não há recomendação para digitar. Espera uma detecção com palavras.");
+        return;
+      }
+
+      void (async () => {
+        try {
+          await typeRecommendedWordIntoFocusedApp(toPaste);
+          console.log(`Digitado: ${normalize(toPaste)}`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.log(`\nNão foi possível digitar: ${msg}`);
+        }
+      })();
       return;
     }
 
@@ -665,6 +1105,7 @@ async function runOcrMode(words: string[], freqMap: Map<string, number>): Promis
           console.log("\nConfiguracao de regiao:");
           const selectedRegion = await promptForRegion(activeRegion);
           activeRegion = selectedRegion;
+          persistOcrRegion(activeRegion);
           if (activeRegion) {
             console.log(`Regiao atualizada: ${formatRegion(activeRegion)}`);
           } else {
@@ -714,6 +1155,7 @@ async function runOcrMode(words: string[], freqMap: Map<string, number>): Promis
       const bestSequence = chooseBestSequence(words, candidates, freqMap);
 
       if (!bestSequence) {
+        lastRecommendedWord = null;
         if (manualScreenshotRequested) {
           console.log("\nNenhuma sequencia valida detectada na regiao atual.");
           console.log("Dica: ajuste a regiao (tecla r) ou tente tela inteira (tecla a).\n");
@@ -736,7 +1178,9 @@ async function runOcrMode(words: string[], freqMap: Map<string, number>): Promis
       } else {
         console.log(`\nDetectado automaticamente: ${bestSequence}`);
       }
-      printResult(words, bestSequence, freqMap);
+      lastRecommendedWord = printResult(words, bestSequence, freqMap, {
+        humanTierWordPick: true,
+      });
       console.log("");
       manualScreenshotRequested = false;
       forceScreenshot = false;
