@@ -1,0 +1,20 @@
+{
+  "name": "palavras-cli",
+  "private": true,
+  "scripts": {
+    "build": "tsc --noEmit",
+    "start": "tsx index.ts",
+    "start:ocr": "tsx index.ts --ocr"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.17",
+    "@types/screenshot-desktop": "^1.15.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "pngjs": "^7.0.0",
+    "screenshot-desktop": "^1.15.4",
+    "tesseract.js": "^7.0.0"
+  }
+}

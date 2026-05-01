@@ -1,0 +1,32 @@
+# Dependências
+node_modules/
+
+# Cache local (primeira execução descarrega da rede)
+palavras-cache.txt
+freq-pt-opensubtitles-full.txt
+
+# Screenshots / OCR debug
+debug/
+
+# Logs e ferramentas
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# Build / TypeScript (se passares a emitir ficheiros)
+dist/
+*.tsbuildinfo
+
+# Ambiente
+.env
+.env.*
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# IDE / editor (opcional)
+.idea/
+*.swp
+*.swo
