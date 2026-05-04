@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="pt">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>palavras — controlo</title>
+    <style>
+      :root {
+        color-scheme: dark light;
+        --bg: #0f1216;
+        --fg: #e8eaed;
+        --muted: #9aa0a6;
+        --accent: #3b82f6;
+        --card: #1a1f26;
+        --border: #2d3540;
+        --err: #f87171;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f4f6f8;
+          --fg: #111827;
+          --muted: #4b5563;
+          --card: #fff;
+          --border: #e5e7eb;
+          --err: #b91c1c;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        margin: 0;
+        padding: 1.25rem;
+        background: var(--bg);
+        color: var(--fg);
+        line-height: 1.5;
+        max-width: 52rem;
+        margin-left: auto;
+        margin-right: auto;
+      }
+      h1 {
+        font-size: 1.35rem;
+        font-weight: 650;
+        margin: 0 0 0.35rem;
+      }
+      .lead {
+        color: var(--muted);
+        margin: 0 0 1.25rem;
+        font-size: 0.95rem;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1rem 1.1rem;
+        margin-bottom: 1rem;
+      }
+      .card h2 {
+        font-size: 1.05rem;
+        margin: 0 0 0.5rem;
+      }
+      .card h3 {
+        font-size: 0.95rem;
+        margin: 0 0 0.5rem;
+      }
+      label {
+        display: block;
+        font-size: 0.85rem;
+        color: var(--muted);
+        margin-bottom: 0.25rem;
+      }
+      input[type="number"] {
+        width: 100%;
+        padding: 0.5rem 0.6rem;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--fg);
+        font-size: 1rem;
+      }
+      button {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        padding: 0.45rem 0.9rem;
+        border-radius: 8px;
+        font-size: 0.9rem;
+        cursor: pointer;
+        margin-top: 0.5rem;
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      button.secondary {
+        background: transparent;
+        color: var(--accent);
+        border: 1px solid var(--accent);
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+      }
+      .muted {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      .error,
+      #status-dict.error {
+        color: var(--err);
+      }
+      #status-dict {
+        font-size: 0.88rem;
+        margin: 0.35rem 0 0.75rem;
+      }
+      progress {
+        width: 100%;
+        margin-top: 0.5rem;
+      }
+      ul {
+        margin: 0.25rem 0 0;
+        padding-left: 1.2rem;
+      }
+      .screen-stage {
+        position: relative;
+        margin-top: 0.75rem;
+        width: 100%;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: #000;
+        --preview-max-height: 480px;
+        max-height: min(90vh, 960px);
+        overflow: auto;
+      }
+      .screen-video-stack {
+        position: relative;
+        display: block;
+        width: 100%;
+        line-height: 0;
+      }
+      /* O vídeo com stream captura o rato por cima do overlay; sem isto o desenho da zona OCR não recebe eventos. */
+      .screen-stage .screen-video {
+        display: block;
+        width: 100%;
+        max-height: var(--preview-max-height, 480px);
+        object-fit: contain;
+        vertical-align: top;
+        pointer-events: none;
+      }
+      .screen-stage .screen-overlay {
+        position: absolute;
+        inset: 0;
+        cursor: crosshair;
+        touch-action: none;
+        z-index: 1;
+        pointer-events: auto;
+      }
+      .screen-stage .screen-selection-box {
+        position: absolute;
+        z-index: 2;
+        pointer-events: none;
+        border: 2px dashed var(--accent);
+        border-radius: 2px;
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35) inset;
+        background: rgba(59, 130, 246, 0.12);
+      }
+      input[type="range"].preview-height-range {
+        flex: 1;
+        min-width: 0;
+        max-width: 28rem;
+      }
+      .screen-stage.hidden {
+        display: none;
+      }
+      .inline-fields {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+        gap: 0.5rem 0.75rem;
+        margin-top: 0.5rem;
+      }
+      .inline-fields label {
+        margin-bottom: 0.1rem;
+      }
+      .inline-fields input {
+        width: 100%;
+      }
+      button.danger {
+        background: #b91c1c;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>palavras (web) — controlo</h1>
+    <p class="lead">
+      Esta janela fica para <strong>partilha de ecrã</strong>, zona de OCR e opções. As <strong>sugestões</strong> aparecem
+      noutra janela do Chrome (podes mudá-la de sítio e redimensionar). Usa
+      <strong>«Abrir janela de sugestões»</strong> se a fechares, ou inicia a partilha (abre-a automaticamente no mesmo
+      clique). Requer <strong>HTTPS ou localhost</strong>.
+    </p>
+
+    <p id="status-dict" class="muted">A iniciar…</p>
+    <div class="row" style="margin-bottom: 0.75rem">
+      <button type="button" class="secondary" id="btn-load-dict">Recarregar dicionário</button>
+      <button type="button" class="secondary" id="btn-open-suggestions">Abrir janela de sugestões</button>
+    </div>
+
+    <div class="card">
+      <h2>Partilhar ecrã — deteção automática</h2>
+      <p class="muted">
+        Clica em “Iniciar”: o browser pede que escolhas <strong>ecrã inteiro</strong>, <strong>janela</strong> ou
+        <strong>separador</strong>. Ideal: partilhar só a janela ou o separador do jogo. Entre análises o ecrã é
+        amostrado e o OCR corre localmente; quando a sequência detetada mudar, a <strong>janela de sugestões</strong>
+        atualiza-se.
+      </p>
+      <div class="inline-fields">
+        <div>
+          <label for="screen-poll-ms">Pausa entre análises (ms)</label>
+          <input type="number" id="screen-poll-ms" value="1800" min="400" step="100" />
+        </div>
+        <div>
+          <label for="screen-max-w">Largura máx. da imagem (px)</label>
+          <input type="number" id="screen-max-w" value="960" min="320" max="1920" step="80" />
+        </div>
+        <div>
+          <label for="crop-left">Recorte % esquerda</label>
+          <input type="number" id="crop-left" value="0" min="0" max="100" />
+        </div>
+        <div>
+          <label for="crop-top">Recorte % topo</label>
+          <input type="number" id="crop-top" value="0" min="0" max="100" />
+        </div>
+        <div>
+          <label for="crop-w">Recorte % largura</label>
+          <input type="number" id="crop-w" value="100" min="1" max="100" />
+        </div>
+        <div>
+          <label for="crop-h">Recorte % altura</label>
+          <input type="number" id="crop-h" value="100" min="1" max="100" />
+        </div>
+      </div>
+      <p class="muted" style="margin-top: 0.5rem">
+        Recorte em <strong>percentagem do vídeo real</strong> (não das barras pretas). Podes editar os números ou
+        <strong>arrastar na pré-visualização</strong> depois de iniciar a partilha — o overlay desenha a zona onde o
+        OCR corre.
+      </p>
+      <div style="margin-top: 0.65rem">
+        <label for="preview-max-height-range">Altura da pré-visualização (px)</label>
+        <p class="muted" style="margin: 0.2rem 0 0.35rem; font-size: 0.82rem">
+          Valores maiores tornam o retângulo de OCR mais fácil de desenhar. Se ultrapassar o ecrã, usa a
+          <strong>scroll</strong> desta caixa.
+        </p>
+        <div class="row" style="margin-top: 0.25rem; align-items: center">
+          <span class="muted" style="font-size: 0.8rem">240</span>
+          <input
+            type="range"
+            id="preview-max-height-range"
+            class="preview-height-range"
+            min="240"
+            max="900"
+            step="20"
+            value="480"
+          />
+          <span class="muted" style="font-size: 0.8rem">900</span>
+          <output
+            id="preview-max-height-out"
+            for="preview-max-height-range"
+            style="min-width: 3.25rem; font-variant-numeric: tabular-nums; font-size: 0.9rem"
+          >
+            480
+          </output>
+        </div>
+      </div>
+      <div class="row" style="margin-top: 0.5rem">
+        <button type="button" id="btn-screen-start">Iniciar partilha e OCR contínuo</button>
+        <button type="button" class="danger" id="btn-screen-stop" disabled>Parar</button>
+        <button type="button" class="secondary" id="btn-crop-full">Zona OCR: ecrã inteiro</button>
+      </div>
+      <p id="screen-status" class="muted" style="margin-top: 0.5rem"></p>
+      <div id="screen-preview-wrap" class="screen-stage hidden">
+        <div id="screen-video-stack" class="screen-video-stack">
+          <video id="screen-preview" class="screen-video" playsinline muted autoplay></video>
+          <div
+            id="screen-overlay"
+            class="screen-overlay"
+            aria-label="Arrasta para escolher a zona de OCR"
+            title="Arrasta para escolher a zona de OCR"
+          ></div>
+          <div id="screen-selection-box" class="screen-selection-box" hidden></div>
+        </div>
+      </div>
+      <progress id="screen-ocr-progress" max="100" value="0" hidden></progress>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
