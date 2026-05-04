@@ -172,6 +172,33 @@
         min-width: 0;
         max-width: 28rem;
       }
+      .word-len-sliders {
+        margin-top: 0.65rem;
+      }
+      .word-len-sliders label {
+        display: block;
+        font-size: 0.85rem;
+        color: var(--muted);
+        margin-bottom: 0.2rem;
+      }
+      .word-len-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem 0.75rem;
+        margin-bottom: 0.55rem;
+      }
+      .word-len-row input[type="range"] {
+        flex: 1;
+        min-width: 8rem;
+        max-width: 22rem;
+      }
+      .word-len-row output,
+      .word-len-row .word-len-out {
+        font-variant-numeric: tabular-nums;
+        min-width: 2.5rem;
+        font-size: 0.95rem;
+      }
       .screen-stage.hidden {
         display: none;
       }
@@ -225,6 +252,26 @@
       </div>
       <button type="button" class="secondary" id="btn-load-dict">Recarregar dicionário</button>
       <button type="button" class="secondary" id="btn-open-suggestions">Abrir janela de sugestões</button>
+    </div>
+
+    <div class="card">
+      <h2>Comprimento das palavras</h2>
+      <p class="muted">
+        Só contam palavras com este número de letras (inclusive). Se o mínimo for maior que o máximo, os valores
+        trocam automaticamente. Útil para jogos com limite de tamanho.
+      </p>
+      <div class="word-len-sliders">
+        <div class="word-len-row">
+          <label for="word-len-min">Mínimo de letras</label>
+          <input type="range" id="word-len-min" min="1" max="24" value="1" step="1" />
+          <span class="word-len-out" id="word-len-min-out">1</span>
+        </div>
+        <div class="word-len-row">
+          <label for="word-len-max">Máximo de letras</label>
+          <input type="range" id="word-len-max" min="1" max="24" value="15" step="1" />
+          <span class="word-len-out" id="word-len-max-out">15</span>
+        </div>
+      </div>
     </div>
 
     <div class="card">

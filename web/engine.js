@@ -13,7 +13,41 @@ export const FREQUENCY_URL_EN =
   "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_full.txt";
 
 export const MAX_RESULTS = 5;
+/** @deprecated use DEFAULT_MAX_WORD_LENGTH — mantido para imports antigos */
 export const MAX_WORD_LENGTH = 15;
+export const DEFAULT_MIN_WORD_LENGTH = 1;
+export const DEFAULT_MAX_WORD_LENGTH = 15;
+/** Limites absolutos dos sliders na UI (letras). */
+export const WORD_LENGTH_SLIDER_ABS_MIN = 1;
+export const WORD_LENGTH_SLIDER_ABS_MAX = 24;
+
+/**
+ * Garante inteiros dentro do intervalo global e min ≤ max.
+ * @param {number} minLen
+ * @param {number} maxLen
+ * @returns {{ minLen: number, maxLen: number }}
+ */
+export function clampWordLengthBounds(minLen, maxLen) {
+  const absMin = WORD_LENGTH_SLIDER_ABS_MIN;
+  const absMax = WORD_LENGTH_SLIDER_ABS_MAX;
+  let mn = Math.round(Number(minLen));
+  let mx = Math.round(Number(maxLen));
+  if (!Number.isFinite(mn)) {
+    mn = DEFAULT_MIN_WORD_LENGTH;
+  }
+  if (!Number.isFinite(mx)) {
+    mx = DEFAULT_MAX_WORD_LENGTH;
+  }
+  mn = Math.min(absMax, Math.max(absMin, mn));
+  mx = Math.min(absMax, Math.max(absMin, mx));
+  if (mn > mx) {
+    const t = mn;
+    mn = mx;
+    mx = t;
+  }
+  return { minLen: mn, maxLen: mx };
+}
+
 export const ALLOW_HYPHEN_IN_LEXEME = false;
 export const ALLOW_APOSTROPHE_IN_LEXEME = true;
 
@@ -247,7 +281,11 @@ export function pickPlayWordHumanTiered(matches, freqMap, locale = "pt-BR") {
   return { word: pickRandomFromCorpusWeightedPool(ranked, 5), tier };
 }
 
-export function findMatchingWords(words, sequence, locale = "pt-BR") {
+export function findMatchingWords(words, sequence, locale = "pt-BR", lenBounds = {}) {
+  const { minLen, maxLen } = clampWordLengthBounds(
+    lenBounds.minLen ?? DEFAULT_MIN_WORD_LENGTH,
+    lenBounds.maxLen ?? DEFAULT_MAX_WORD_LENGTH
+  );
   const matches = [];
   const normalizedSequence = normalize(sequence);
 
@@ -258,7 +296,8 @@ export function findMatchingWords(words, sequence, locale = "pt-BR") {
       continue;
     }
 
-    if (word.length > MAX_WORD_LENGTH || !isAllowedLexeme(word)) {
+    const len = word.length;
+    if (len < minLen || len > maxLen || !isAllowedLexeme(word)) {
       continue;
     }
 
@@ -293,12 +332,12 @@ export function extractCandidateSequences(text) {
   return [...unique];
 }
 
-export function chooseBestSequence(words, candidates, freqMap, locale = "pt-BR") {
+export function chooseBestSequence(words, candidates, freqMap, locale = "pt-BR", lenBounds = {}) {
   let best = null;
   let bestScore = -1;
 
   for (const candidate of candidates) {
-    const matches = findMatchingWords(words, candidate, locale);
+    const matches = findMatchingWords(words, candidate, locale, lenBounds);
     if (matches.length === 0) {
       continue;
     }
@@ -341,7 +380,12 @@ export function buildSearchPresentation(words, freqMap, sequence, options = {}) 
   const scrabbleLabel =
     options.scrabbleLabel ?? (lang === "en" ? "Scrabble (EN / international tiles)" : "Scrabble BR");
 
-  const matches = findMatchingWords(words, sequence, locale);
+  const lengthFilter = clampWordLengthBounds(
+    options.minWordLen ?? DEFAULT_MIN_WORD_LENGTH,
+    options.maxWordLen ?? DEFAULT_MAX_WORD_LENGTH
+  );
+
+  const matches = findMatchingWords(words, sequence, locale, lengthFilter);
   const sequenceUpper = normalize(sequence);
 
   if (matches.length === 0) {
@@ -437,5 +481,6 @@ export function buildSearchPresentation(words, freqMap, sequence, options = {}) 
     lang,
     scrabbleLabel,
     pickFreqLine: freqLineFor(pickFreq),
+    lengthFilter,
   };
 }

@@ -7,6 +7,9 @@ import {
   extractCandidateSequences,
   chooseBestSequence,
   buildSearchPresentation,
+  clampWordLengthBounds,
+  DEFAULT_MIN_WORD_LENGTH,
+  DEFAULT_MAX_WORD_LENGTH,
 } from "./engine.js";
 
 /** Tesseract.js via CDN (WASM no browser — funciona em Windows, Linux, macOS). */
@@ -26,6 +29,8 @@ let screenActive = false;
 let screenStream = null;
 let screenWorker = null;
 let lastBestSequenceLive = "";
+/** Chave `min-max` para repetir OCR sem re-render quando só o filtro de comprimento mudou (o slider trata disso). */
+let lastOcrBoundsKey = "";
 /** @type {Window | null} */
 let suggestionsWindow = null;
 /** @type {{ x0: number, y0: number } | null} */
@@ -54,6 +59,10 @@ const el = {
   screenSelectionBox: document.getElementById("screen-selection-box"),
   screenOcrProgress: document.getElementById("screen-ocr-progress"),
   btnCropFull: document.getElementById("btn-crop-full"),
+  wordLenMin: document.getElementById("word-len-min"),
+  wordLenMax: document.getElementById("word-len-max"),
+  wordLenMinOut: document.getElementById("word-len-min-out"),
+  wordLenMaxOut: document.getElementById("word-len-max-out"),
 };
 
 function setStatus(msg, isError = false) {
@@ -63,6 +72,43 @@ function setStatus(msg, isError = false) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readWordLengthBoundsFromUi() {
+  if (!el.wordLenMin || !el.wordLenMax) {
+    return clampWordLengthBounds(DEFAULT_MIN_WORD_LENGTH, DEFAULT_MAX_WORD_LENGTH);
+  }
+  return clampWordLengthBounds(Number(el.wordLenMin.value), Number(el.wordLenMax.value));
+}
+
+function wordLengthBoundsKey() {
+  const { minLen, maxLen } = readWordLengthBoundsFromUi();
+  return `${minLen}-${maxLen}`;
+}
+
+function syncWordLengthSliderOutputs() {
+  if (!el.wordLenMin || !el.wordLenMax) {
+    return;
+  }
+  const { minLen, maxLen } = readWordLengthBoundsFromUi();
+  el.wordLenMin.value = String(minLen);
+  el.wordLenMax.value = String(maxLen);
+  if (el.wordLenMinOut) {
+    el.wordLenMinOut.textContent = String(minLen);
+  }
+  if (el.wordLenMaxOut) {
+    el.wordLenMaxOut.textContent = String(maxLen);
+  }
+}
+
+/** Atualiza sugestões com a última sequência detetada (útil ao mudar o filtro de comprimento). */
+function refreshLiveSearchIfPossible() {
+  syncWordLengthSliderOutputs();
+  if (!words.length || !lastBestSequenceLive) {
+    return;
+  }
+  lastOcrBoundsKey = wordLengthBoundsKey();
+  runSearch(lastBestSequenceLive, true);
 }
 
 function clampNum(n, min, max) {
@@ -512,9 +558,17 @@ function buildSuggestionsHtml(pres) {
     ? `Top 5 by tile score (${escapeHtml(pres.scrabbleLabel ?? "Scrabble")})`
     : `Top 5 maior pontuação (${escapeHtml(pres.scrabbleLabel ?? "Scrabble BR")})`;
 
+  const lf = pres.lengthFilter;
+  const lengthFilterLine =
+    lf &&
+    (isEn
+      ? `Word length allowed: ${lf.minLen}–${lf.maxLen} letters`
+      : `Comprimento permitido: ${lf.minLen}–${lf.maxLen} letras`);
+
   let html = `<section class="card">
     <h2>${seqTitle}: ${escapeHtml(pres.sequenceUpper)}</h2>
     <p class="muted">${dictCount}</p>
+    ${lengthFilterLine ? `<p class="muted">${escapeHtml(lengthFilterLine)}</p>` : ""}
     <p><strong>${bestTitle}</strong> <span class="muted">(${escapeHtml(pres.criterionNote)})</span></p>
     <p class="hero">→ <strong>${escapeHtml(pres.pickShown)}</strong> (${escapeHtml(pres.pickHighlight)}) — ${pres.pickLen} ${lettersWord}; ${escapeHtml(freqLine)}</p>
   </section>`;
@@ -585,12 +639,15 @@ function langUi() {
 
 function runSearch(sequence, humanTier) {
   const u = langUi();
+  const { minLen, maxLen } = readWordLengthBoundsFromUi();
   const pres = buildSearchPresentation(words, freqMap, sequence, {
     humanTierWordPick: humanTier,
     locale: u.locale,
     lang: u.lang,
     freqCorpusShort: u.freqCorpusShort,
     scrabbleLabel: u.scrabbleLabel,
+    minWordLen: minLen,
+    maxWordLen: maxLen,
   });
   renderPresentation(pres);
 }
@@ -620,6 +677,7 @@ async function loadDictionary() {
     setStatus(
       `Pronto: ${words.length.toLocaleString(u.locale)} entradas; corpus ${currentLang === "en" ? "EN" : "PT"}.`
     );
+    refreshLiveSearchIfPossible();
   } catch (e) {
     setStatus(e instanceof Error ? e.message : String(e), true);
     throw e;
@@ -641,6 +699,13 @@ el.langSelect?.addEventListener("change", () => {
   void loadDictionary();
 });
 
+for (const r of [el.wordLenMin, el.wordLenMax]) {
+  r?.addEventListener("input", () => {
+    syncWordLengthSliderOutputs();
+    refreshLiveSearchIfPossible();
+  });
+}
+
 el.btnOpenSuggestions.addEventListener("click", () => {
   openSuggestionsWindowFromUserGesture();
   setStatus("Janela de sugestões aberta ou focada. Redimensiona e move como qualquer janela.");
@@ -649,6 +714,7 @@ el.btnOpenSuggestions.addEventListener("click", () => {
 async function stopScreenCapture() {
   screenActive = false;
   lastBestSequenceLive = "";
+  lastOcrBoundsKey = "";
 
   if (screenStream) {
     for (const track of screenStream.getTracks()) {
@@ -704,19 +770,22 @@ async function screenOcrLoop() {
 
       const text = data.text ?? "";
       const candidates = extractCandidateSequences(text);
-      const best = chooseBestSequence(words, candidates, freqMap, langUi().locale);
+      const lenBounds = readWordLengthBoundsFromUi();
+      const best = chooseBestSequence(words, candidates, freqMap, langUi().locale, lenBounds);
 
       if (!best) {
         el.screenStatus.textContent = "Nenhuma sequência válida neste frame…";
         continue;
       }
 
-      if (best === lastBestSequenceLive) {
+      const boundsKey = wordLengthBoundsKey();
+      if (best === lastBestSequenceLive && boundsKey === lastOcrBoundsKey) {
         el.screenStatus.textContent = `Estável: ${best}`;
         continue;
       }
 
       lastBestSequenceLive = best;
+      lastOcrBoundsKey = boundsKey;
       el.screenStatus.textContent = `Nova sequência: ${best}`;
       runSearch(best, true);
     } catch (e) {
@@ -775,6 +844,7 @@ el.btnScreenStart.addEventListener("click", async () => {
 
     el.screenPreviewWrap.classList.remove("hidden");
     lastBestSequenceLive = "";
+    lastOcrBoundsKey = "";
     requestAnimationFrame(() => {
       syncCropBoxVisual();
     });
@@ -812,6 +882,7 @@ el.btnScreenStop.addEventListener("click", () => {
 
 void (async () => {
   try {
+    syncWordLengthSliderOutputs();
     await loadDictionary();
   } catch {
     /* mensagem já em setStatus */
