@@ -202,7 +202,27 @@
     </p>
 
     <p id="status-dict" class="muted">A iniciar…</p>
-    <div class="row" style="margin-bottom: 0.75rem">
+    <div class="row" style="margin-bottom: 0.75rem; align-items: flex-end">
+      <div>
+        <label for="lang-select" style="display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.2rem"
+          >Dicionário</label
+        >
+        <select
+          id="lang-select"
+          style="
+            padding: 0.45rem 0.6rem;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: var(--bg);
+            color: var(--fg);
+            font-size: 0.95rem;
+            min-width: 11rem;
+          "
+        >
+          <option value="pt">Português (BR)</option>
+          <option value="en">English</option>
+        </select>
+      </div>
       <button type="button" class="secondary" id="btn-load-dict">Recarregar dicionário</button>
       <button type="button" class="secondary" id="btn-open-suggestions">Abrir janela de sugestões</button>
     </div>

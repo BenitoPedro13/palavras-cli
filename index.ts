@@ -8,13 +8,63 @@ import screenshot = require("screenshot-desktop");
 import { PNG } from "pngjs";
 import { createWorker, type Worker } from "tesseract.js";
 
-const WORDS_URL =
+const WORDS_URL_PT =
   "https://raw.githubusercontent.com/pythonprobr/palavras/master/palavras.txt";
-const CACHE_PATH = path.resolve(process.cwd(), "palavras-cache.txt");
+const CACHE_PATH_PT = path.resolve(process.cwd(), "palavras-cache.txt");
+/** Lista EN: apenas letras a–z (dwyl/english-words). */
+const WORDS_URL_EN =
+  "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt";
+const CACHE_PATH_EN = path.resolve(process.cwd(), "words-en-alpha-cache.txt");
 /** Corpus PT: contagens em legendas (OpenSubtitles), projeto FrequencyWords (2018). */
-const FREQUENCY_URL =
+const FREQUENCY_URL_PT =
   "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/pt/pt_full.txt";
-const FREQUENCY_CACHE_PATH = path.resolve(process.cwd(), "freq-pt-opensubtitles-full.txt");
+const FREQUENCY_CACHE_PATH_PT = path.resolve(process.cwd(), "freq-pt-opensubtitles-full.txt");
+/** Corpus EN: mesmo projeto, legendas EN (2018). */
+const FREQUENCY_URL_EN =
+  "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_full.txt";
+const FREQUENCY_CACHE_PATH_EN = path.resolve(process.cwd(), "freq-en-opensubtitles-full.txt");
+
+type WordLang = "pt" | "en";
+
+type LangRuntime = {
+  lang: WordLang;
+  locale: string;
+  wordsUrl: string;
+  wordsCachePath: string;
+  frequencyUrl: string;
+  frequencyCachePath: string;
+  freqCorpusShort: string;
+  scrabbleLabel: string;
+  ocrLanguages: string;
+};
+
+function getLangRuntime(lang: WordLang): LangRuntime {
+  if (lang === "en") {
+    return {
+      lang: "en",
+      locale: "en-US",
+      wordsUrl: WORDS_URL_EN,
+      wordsCachePath: CACHE_PATH_EN,
+      frequencyUrl: FREQUENCY_URL_EN,
+      frequencyCachePath: FREQUENCY_CACHE_PATH_EN,
+      freqCorpusShort: "FrequencyWords / OpenSubtitles EN",
+      scrabbleLabel: "Scrabble (EN / international tiles)",
+      ocrLanguages: "eng",
+    };
+  }
+
+  return {
+    lang: "pt",
+    locale: "pt-BR",
+    wordsUrl: WORDS_URL_PT,
+    wordsCachePath: CACHE_PATH_PT,
+    frequencyUrl: FREQUENCY_URL_PT,
+    frequencyCachePath: FREQUENCY_CACHE_PATH_PT,
+    freqCorpusShort: "FrequencyWords / legendas PT",
+    scrabbleLabel: "Scrabble BR",
+    ocrLanguages: "por+eng",
+  };
+}
 const MAX_RESULTS = 5;
 /** Comprimento máximo de cada entrada do dicionário. */
 const MAX_WORD_LENGTH = 15;
@@ -180,8 +230,8 @@ async function ensureCachedText(url: string, cachePath: string): Promise<string>
   return fs.readFileSync(cachePath, "utf-8");
 }
 
-async function getWordList(): Promise<string[]> {
-  const content = await ensureCachedText(WORDS_URL, CACHE_PATH);
+async function getWordList(rt: LangRuntime): Promise<string[]> {
+  const content = await ensureCachedText(rt.wordsUrl, rt.wordsCachePath);
   return content
     .split(/\r?\n/)
     .map((word) => word.trim())
@@ -224,8 +274,8 @@ function parseFrequencyCorpus(content: string): Map<string, number> {
   return map;
 }
 
-async function loadWordFrequencies(): Promise<Map<string, number>> {
-  const content = await ensureCachedText(FREQUENCY_URL, FREQUENCY_CACHE_PATH);
+async function loadWordFrequencies(rt: LangRuntime): Promise<Map<string, number>> {
+  const content = await ensureCachedText(rt.frequencyUrl, rt.frequencyCachePath);
   return parseFrequencyCorpus(content);
 }
 
@@ -239,7 +289,8 @@ function getCorpusFrequency(word: string, freqMap: Map<string, number>): number 
  */
 function sortMatchesByLengthThenCorpus(
   matches: string[],
-  freqMap: Map<string, number>
+  freqMap: Map<string, number>,
+  locale: string
 ): string[] {
   return [...matches].sort((a, b) => {
     const lenDiff = b.length - a.length;
@@ -252,7 +303,7 @@ function sortMatchesByLengthThenCorpus(
       return freqDiff;
     }
 
-    return a.localeCompare(b, "pt-BR");
+    return a.localeCompare(b, locale);
   });
 }
 
@@ -296,14 +347,18 @@ function bucketMatchesByLengthTier(matches: string[]): Record<LengthTier, string
   return buckets;
 }
 
-function sortMatchesByCorpusThenLocale(matches: string[], freqMap: Map<string, number>): string[] {
+function sortMatchesByCorpusThenLocale(
+  matches: string[],
+  freqMap: Map<string, number>,
+  locale: string
+): string[] {
   return [...matches].sort((a, b) => {
     const freqDiff = getCorpusFrequency(b, freqMap) - getCorpusFrequency(a, freqMap);
     if (freqDiff !== 0) {
       return freqDiff;
     }
 
-    return a.localeCompare(b, "pt-BR");
+    return a.localeCompare(b, locale);
   });
 }
 
@@ -342,7 +397,8 @@ function weightedRandomAmongTiers(nonEmptyTiers: LengthTier[]): LengthTier {
  */
 function pickPlayWordHumanTiered(
   matches: string[],
-  freqMap: Map<string, number>
+  freqMap: Map<string, number>,
+  locale: string
 ): { word: string; tier: LengthTier } {
   if (matches.length === 1) {
     return { word: matches[0], tier: "medium" };
@@ -354,12 +410,12 @@ function pickPlayWordHumanTiered(
 
   const tier =
     nonEmpty.length === 1 ? nonEmpty[0] : weightedRandomAmongTiers(nonEmpty);
-  const ranked = sortMatchesByCorpusThenLocale(buckets[tier], freqMap);
+  const ranked = sortMatchesByCorpusThenLocale(buckets[tier], freqMap, locale);
 
   return { word: pickRandomFromCorpusWeightedPool(ranked, 5), tier };
 }
 
-function findMatchingWords(words: string[], sequence: string): string[] {
+function findMatchingWords(words: string[], sequence: string, locale: string): string[] {
   const matches: string[] = [];
   const normalizedSequence = normalize(sequence);
 
@@ -377,7 +433,7 @@ function findMatchingWords(words: string[], sequence: string): string[] {
     matches.push(word);
   }
 
-  return matches.sort((a, b) => b.length - a.length || a.localeCompare(b, "pt-BR"));
+  return matches.sort((a, b) => b.length - a.length || a.localeCompare(b, locale));
 }
 
 /** Simula digitação real carácter a carácter (sem clipboard nem Cmd+V). macOS / JXA. */
@@ -518,9 +574,11 @@ function printResult(
   words: string[],
   sequence: string,
   freqMap: Map<string, number>,
+  rt: LangRuntime,
   options?: PrintResultOptions
 ): string | null {
-  const matches = findMatchingWords(words, sequence);
+  const { locale, lang, freqCorpusShort, scrabbleLabel } = rt;
+  const matches = findMatchingWords(words, sequence, locale);
   const sequenceUpper = normalize(sequence);
 
   if (matches.length === 0) {
@@ -531,50 +589,80 @@ function printResult(
   console.log(`Sequência: ${sequenceUpper}`);
   console.log(`Encontradas: ${matches.length} palavra(s)\n`);
 
-  const sortedForPlay = sortMatchesByLengthThenCorpus(matches, freqMap);
+  const sortedForPlay = sortMatchesByLengthThenCorpus(matches, freqMap, locale);
 
   let pick: string;
   let criterionNote: string;
 
   if (options?.humanTierWordPick) {
-    const { word, tier } = pickPlayWordHumanTiered(matches, freqMap);
+    const { word, tier } = pickPlayWordHumanTiered(matches, freqMap, locale);
     pick = word;
-    const tierPt =
-      tier === "short"
-        ? "faixa curta"
-        : tier === "medium"
-          ? "faixa média"
-          : "faixa longa";
-    criterionNote =
-      `modo OCR (mais natural): entre os comprimentos possíveis para esta sequência foi sorteada a ${tierPt}; ` +
-      `dentro dela, palavra aleatória entre as ~5 mais frequentes no corpus`;
+    if (lang === "en") {
+      const tierEn =
+        tier === "short" ? "short length band" : tier === "medium" ? "medium length band" : "long length band";
+      criterionNote =
+        `OCR mode: among possible lengths for this sequence, a ${tierEn} was picked at random; ` +
+        `within it, a random word among the ~5 most frequent in the corpus`;
+    } else {
+      const tierPt =
+        tier === "short"
+          ? "faixa curta"
+          : tier === "medium"
+            ? "faixa média"
+            : "faixa longa";
+      criterionNote =
+        `modo OCR (mais natural): entre os comprimentos possíveis para esta sequência foi sorteada a ${tierPt}; ` +
+        `dentro dela, palavra aleatória entre as ~5 mais frequentes no corpus`;
+    }
   } else {
     pick = sortedForPlay[0];
     criterionNote =
-      "palavra mais longa no dicionário que contém a sequência; empate por uso no corpus — FrequencyWords / legendas PT";
+      lang === "en"
+        ? `longest dictionary word containing the sequence; ties broken by corpus frequency — ${freqCorpusShort}`
+        : `palavra mais longa no dicionário que contém a sequência; empate por uso no corpus — ${freqCorpusShort}`;
   }
 
   const pickShown = normalize(pick);
   const pickFreq = getCorpusFrequency(pick, freqMap);
+  const lenUnit = lang === "en" ? "letters" : "letras";
+  const ptsUnit = lang === "en" ? "points" : "pontos";
+  const inCorpus =
+    lang === "en"
+      ? pickFreq > 0
+        ? `; ~${pickFreq.toLocaleString(locale)} in corpus`
+        : "; not attested in corpus"
+      : pickFreq > 0
+        ? `; ~${pickFreq.toLocaleString(locale)} no corpus`
+        : "; sem ocorrência no corpus";
 
-  console.log(`Melhor candidato (${criterionNote}):`);
   console.log(
-    `→ ${pickShown} (${highlightSequence(pick, sequenceUpper)}) — ` +
-      `${pick.length} letras` +
-      (pickFreq > 0
-        ? `; ~${pickFreq.toLocaleString("pt-BR")} no corpus`
-        : "; sem ocorrência no corpus")
+    lang === "en"
+      ? `Best candidate (${criterionNote}):`
+      : `Melhor candidato (${criterionNote}):`
+  );
+  console.log(
+    `→ ${pickShown} (${highlightSequence(pick, sequenceUpper)}) — ${pick.length} ${lenUnit}${inCorpus}`
   );
 
   const restForPlay = sortedForPlay.filter((w) => w !== pick).slice(0, MAX_RESULTS);
   if (restForPlay.length > 0) {
-    console.log("\nOutras opções pelo mesmo critério (comprimento, depois corpus):");
+    console.log(
+      lang === "en"
+        ? "\nOther options by the same rule (length, then corpus):"
+        : "\nOutras opções pelo mesmo critério (comprimento, depois corpus):"
+    );
     for (const word of restForPlay) {
       const f = getCorpusFrequency(word, freqMap);
       const freqLabel =
-        f > 0 ? `~${f.toLocaleString("pt-BR")} no corpus` : "fora do corpus";
+        lang === "en"
+          ? f > 0
+            ? `~${f.toLocaleString(locale)} in corpus`
+            : "not in corpus"
+          : f > 0
+            ? `~${f.toLocaleString(locale)} no corpus`
+            : "fora do corpus";
       console.log(
-        `- ${normalize(word)} (${highlightSequence(word, sequenceUpper)}) — ${word.length} letras; ${freqLabel}`
+        `- ${normalize(word)} (${highlightSequence(word, sequenceUpper)}) — ${word.length} ${lenUnit}; ${freqLabel}`
       );
     }
   }
@@ -586,14 +674,18 @@ function printResult(
         return scoreDiff;
       }
 
-      return a.localeCompare(b, "pt-BR");
+      return a.localeCompare(b, locale);
     })
     .slice(0, MAX_RESULTS);
 
-  console.log("\nTop 5 maior pontuação (Scrabble BR):");
+  console.log(
+    lang === "en"
+      ? `\nTop 5 by tile score (${scrabbleLabel}):`
+      : `\nTop 5 maior pontuação (${scrabbleLabel}):`
+  );
   for (const word of highestPoints) {
     console.log(
-      `- ${normalize(word)} (${highlightSequence(word, sequenceUpper)}) — ${getWordPoints(word)} pontos`
+      `- ${normalize(word)} (${highlightSequence(word, sequenceUpper)}) — ${getWordPoints(word)} ${ptsUnit}`
     );
   }
 
@@ -615,18 +707,19 @@ function extractCandidateSequences(text: string): string[] {
 function chooseBestSequence(
   words: string[],
   candidates: string[],
-  freqMap: Map<string, number>
+  freqMap: Map<string, number>,
+  locale: string
 ): string | null {
   let best: string | null = null;
   let bestScore = -1;
 
   for (const candidate of candidates) {
-    const matches = findMatchingWords(words, candidate);
+    const matches = findMatchingWords(words, candidate, locale);
     if (matches.length === 0) {
       continue;
     }
 
-    const topWord = sortMatchesByLengthThenCorpus(matches, freqMap)[0];
+    const topWord = sortMatchesByLengthThenCorpus(matches, freqMap, locale)[0];
     const freq = getCorpusFrequency(topWord, freqMap);
     const score =
       topWord.length * 1e15 +
@@ -957,7 +1050,11 @@ async function promptForRegion(currentRegion: OcrRegion | null): Promise<OcrRegi
   }
 }
 
-async function runInteractive(words: string[], freqMap: Map<string, number>): Promise<void> {
+async function runInteractive(
+  words: string[],
+  freqMap: Map<string, number>,
+  rt: LangRuntime
+): Promise<void> {
   console.log('Modo interativo: digite uma sequência e pressione Enter.');
   console.log('Para sair, digite "sair", "q" ou "exit".\n');
 
@@ -980,12 +1077,12 @@ async function runInteractive(words: string[], freqMap: Map<string, number>): Pr
       continue;
     }
 
-    printResult(words, answer, freqMap);
+    printResult(words, answer, freqMap, rt);
     console.log("");
   }
 }
 
-async function runOcrMode(words: string[], freqMap: Map<string, number>): Promise<void> {
+async function runOcrMode(words: string[], freqMap: Map<string, number>, rt: LangRuntime): Promise<void> {
   console.log("Modo OCR iniciado.");
   console.log("Conceda permissão de gravação de tela para o terminal/IDE no macOS.");
   console.log("Controles:");
@@ -1013,7 +1110,7 @@ async function runOcrMode(words: string[], freqMap: Map<string, number>): Promis
     console.log("");
   }
 
-  const worker: Worker = await createWorker("por+eng");
+  const worker: Worker = await createWorker(rt.ocrLanguages);
   let lastBestSequence = "";
   let forceScreenshot = true;
   let isConfiguringRegion = false;
@@ -1152,7 +1249,7 @@ async function runOcrMode(words: string[], freqMap: Map<string, number>): Promis
       }
       const result = await worker.recognize(image);
       const candidates = extractCandidateSequences(result.data.text);
-      const bestSequence = chooseBestSequence(words, candidates, freqMap);
+      const bestSequence = chooseBestSequence(words, candidates, freqMap, rt.locale);
 
       if (!bestSequence) {
         lastRecommendedWord = null;
@@ -1178,7 +1275,7 @@ async function runOcrMode(words: string[], freqMap: Map<string, number>): Promis
       } else {
         console.log(`\nDetectado automaticamente: ${bestSequence}`);
       }
-      lastRecommendedWord = printResult(words, bestSequence, freqMap, {
+      lastRecommendedWord = printResult(words, bestSequence, freqMap, rt, {
         humanTierWordPick: true,
       });
       console.log("");
@@ -1200,22 +1297,78 @@ async function runOcrMode(words: string[], freqMap: Map<string, number>): Promis
   console.log("\nEncerrando OCR.");
 }
 
+function parseCliArgs(argv: string[]): { lang: WordLang; tokens: string[] } {
+  const tokens: string[] = [];
+  let lang: WordLang = "pt";
+
+  for (let i = 2; i < argv.length; i++) {
+    const raw = argv[i];
+    const lower = raw?.toLowerCase() ?? "";
+
+    if (lower === "--english" || lower === "--en") {
+      lang = "en";
+      continue;
+    }
+
+    if (lower === "--lang" || lower === "-l") {
+      const v = (argv[i + 1] ?? "").toLowerCase();
+      if (v === "en" || v === "english") {
+        lang = "en";
+      } else if (v === "pt" || v === "pt-br" || v === "portuguese" || v === "pt_br") {
+        lang = "pt";
+      }
+      if (argv[i + 1] !== undefined) {
+        i++;
+      }
+      continue;
+    }
+
+    if (lower.startsWith("--lang=")) {
+      const v = lower.slice("--lang=".length);
+      if (v === "en" || v === "english") {
+        lang = "en";
+      } else if (v === "pt" || v === "pt-br" || v === "portuguese") {
+        lang = "pt";
+      }
+      continue;
+    }
+
+    if (raw) {
+      tokens.push(raw);
+    }
+  }
+
+  return { lang, tokens };
+}
+
 async function main(): Promise<void> {
   try {
-    const [words, freqMap] = await Promise.all([getWordList(), loadWordFrequencies()]);
-    const arg = process.argv[2]?.trim();
+    const { lang, tokens } = parseCliArgs(process.argv);
+    const rt = getLangRuntime(lang);
+    const [words, freqMap] = await Promise.all([getWordList(rt), loadWordFrequencies(rt)]);
+    const arg0 = tokens[0]?.trim();
 
-    if (arg === "--ocr") {
-      await runOcrMode(words, freqMap);
+    if (arg0 === "--ocr") {
+      console.log(
+        lang === "en"
+          ? "Language: English — word list (dwyl alpha) + OpenSubtitles EN frequencies.\n"
+          : "Idioma: Português — lista pythonprobr + frequências PT (OpenSubtitles).\n"
+      );
+      await runOcrMode(words, freqMap, rt);
       return;
     }
 
-    if (arg) {
-      printResult(words, arg, freqMap);
+    if (arg0) {
+      printResult(words, arg0, freqMap, rt);
       return;
     }
 
-    await runInteractive(words, freqMap);
+    console.log(
+      lang === "en"
+        ? "Language: English — switch with --lang pt\n"
+        : "Idioma: Português — altera com --lang en\n"
+    );
+    await runInteractive(words, freqMap, rt);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Erro inesperado.";
     console.error(message);

@@ -1,6 +1,8 @@
 import {
-  WORDS_URL,
-  FREQUENCY_URL,
+  WORDS_URL_PT,
+  FREQUENCY_URL_PT,
+  WORDS_URL_EN,
+  FREQUENCY_URL_EN,
   parseFrequencyCorpus,
   extractCandidateSequences,
   chooseBestSequence,
@@ -16,6 +18,8 @@ const SUGGESTIONS_WINDOW_NAME = "palavras_sugestoes_panel";
 let words = [];
 let freqMap = new Map();
 let tesseractModule = null;
+/** @type {"pt" | "en"} */
+let currentLang = "pt";
 
 /** Partilha de ecrã + OCR contínuo */
 let screenActive = false;
@@ -29,6 +33,7 @@ let overlayDrag = null;
 
 const el = {
   statusDict: document.getElementById("status-dict"),
+  langSelect: document.getElementById("lang-select"),
   btnLoad: document.getElementById("btn-load-dict"),
   btnOpenSuggestions: document.getElementById("btn-open-suggestions"),
   btnScreenStart: document.getElementById("btn-screen-start"),
@@ -495,29 +500,36 @@ function escapeHtml(s) {
 }
 
 function buildSuggestionsHtml(pres) {
-  const freqLine =
-    pres.pickFreq > 0
-      ? `~${pres.pickFreq.toLocaleString("pt-BR")} no corpus`
-      : "sem ocorrência no corpus";
+  const loc = pres.locale ?? "pt-BR";
+  const isEn = pres.lang === "en";
+  const freqLine = pres.pickFreqLine ?? (isEn ? "not in corpus" : "sem ocorrência no corpus");
+  const lettersWord = isEn ? "letters" : "letras";
+  const seqTitle = isEn ? "Sequence" : "Sequência";
+  const dictCount = `${pres.matchCount.toLocaleString(loc)} ${isEn ? "word(s) in dictionary" : "palavra(s) no dicionário"}`;
+  const bestTitle = isEn ? "Best candidate" : "Melhor candidato";
+  const otherTitle = isEn ? "Other options (length, then corpus)" : "Outras opções (comprimento, depois corpus)";
+  const topTitle = isEn
+    ? `Top 5 by tile score (${escapeHtml(pres.scrabbleLabel ?? "Scrabble")})`
+    : `Top 5 maior pontuação (${escapeHtml(pres.scrabbleLabel ?? "Scrabble BR")})`;
 
   let html = `<section class="card">
-    <h2>Sequência: ${escapeHtml(pres.sequenceUpper)}</h2>
-    <p class="muted">${pres.matchCount.toLocaleString("pt-BR")} palavra(s) no dicionário</p>
-    <p><strong>Melhor candidato</strong> <span class="muted">(${escapeHtml(pres.criterionNote)})</span></p>
-    <p class="hero">→ <strong>${escapeHtml(pres.pickShown)}</strong> (${escapeHtml(pres.pickHighlight)}) — ${pres.pickLen} letras; ${freqLine}</p>
+    <h2>${seqTitle}: ${escapeHtml(pres.sequenceUpper)}</h2>
+    <p class="muted">${dictCount}</p>
+    <p><strong>${bestTitle}</strong> <span class="muted">(${escapeHtml(pres.criterionNote)})</span></p>
+    <p class="hero">→ <strong>${escapeHtml(pres.pickShown)}</strong> (${escapeHtml(pres.pickHighlight)}) — ${pres.pickLen} ${lettersWord}; ${escapeHtml(freqLine)}</p>
   </section>`;
 
   if (pres.restForPlay.length) {
-    html += `<section class="card"><h3>Outras opções (comprimento, depois corpus)</h3><ul>`;
+    html += `<section class="card"><h3>${otherTitle}</h3><ul>`;
     for (const row of pres.restForPlay) {
-      html += `<li><strong>${escapeHtml(row.shown)}</strong> (${escapeHtml(row.highlight)}) — ${row.len} letras; ${escapeHtml(row.freqLabel)}</li>`;
+      html += `<li><strong>${escapeHtml(row.shown)}</strong> (${escapeHtml(row.highlight)}) — ${row.len} ${lettersWord}; ${escapeHtml(row.freqLabel)}</li>`;
     }
     html += `</ul></section>`;
   }
 
-  html += `<section class="card"><h3>Top 5 maior pontuação (Scrabble BR)</h3><ul>`;
+  html += `<section class="card"><h3>${topTitle}</h3><ul>`;
   for (const row of pres.highestPoints) {
-    html += `<li><strong>${escapeHtml(row.shown)}</strong> (${escapeHtml(row.highlight)}) — ${row.points} pontos</li>`;
+    html += `<li><strong>${escapeHtml(row.shown)}</strong> (${escapeHtml(row.highlight)}) — ${row.points} ${isEn ? "points" : "pontos"}</li>`;
   }
   html += `</ul></section>`;
 
@@ -552,9 +564,33 @@ function renderPresentation(pres) {
   root.innerHTML = buildSuggestionsHtml(pres);
 }
 
+function langUi() {
+  if (currentLang === "en") {
+    return {
+      lang: "en",
+      locale: "en-US",
+      freqCorpusShort: "FrequencyWords / OpenSubtitles EN",
+      scrabbleLabel: "Scrabble (EN / international tiles)",
+      ocrLanguages: "eng",
+    };
+  }
+  return {
+    lang: "pt",
+    locale: "pt-BR",
+    freqCorpusShort: "FrequencyWords / legendas PT",
+    scrabbleLabel: "Scrabble BR",
+    ocrLanguages: "por+eng",
+  };
+}
+
 function runSearch(sequence, humanTier) {
+  const u = langUi();
   const pres = buildSearchPresentation(words, freqMap, sequence, {
     humanTierWordPick: humanTier,
+    locale: u.locale,
+    lang: u.lang,
+    freqCorpusShort: u.freqCorpusShort,
+    scrabbleLabel: u.scrabbleLabel,
   });
   renderPresentation(pres);
 }
@@ -568,19 +604,22 @@ async function fetchText(url) {
 }
 
 async function loadDictionary() {
+  currentLang = el.langSelect?.value === "en" ? "en" : "pt";
+  const u = langUi();
   setStatus("A carregar dicionário e frequências…");
   el.btnLoad.disabled = true;
   try {
-    const [wordsText, freqText] = await Promise.all([
-      fetchText(WORDS_URL),
-      fetchText(FREQUENCY_URL),
-    ]);
+    const wordsUrl = currentLang === "en" ? WORDS_URL_EN : WORDS_URL_PT;
+    const freqUrl = currentLang === "en" ? FREQUENCY_URL_EN : FREQUENCY_URL_PT;
+    const [wordsText, freqText] = await Promise.all([fetchText(wordsUrl), fetchText(freqUrl)]);
     words = wordsText
       .split(/\r?\n/)
       .map((w) => w.trim())
       .filter(Boolean);
     freqMap = parseFrequencyCorpus(freqText);
-    setStatus(`Pronto: ${words.length.toLocaleString("pt-BR")} entradas; corpus carregado.`);
+    setStatus(
+      `Pronto: ${words.length.toLocaleString(u.locale)} entradas; corpus ${currentLang === "en" ? "EN" : "PT"}.`
+    );
   } catch (e) {
     setStatus(e instanceof Error ? e.message : String(e), true);
     throw e;
@@ -597,6 +636,10 @@ async function getTesseract() {
 }
 
 el.btnLoad.addEventListener("click", () => void loadDictionary());
+
+el.langSelect?.addEventListener("change", () => {
+  void loadDictionary();
+});
 
 el.btnOpenSuggestions.addEventListener("click", () => {
   openSuggestionsWindowFromUserGesture();
@@ -661,7 +704,7 @@ async function screenOcrLoop() {
 
       const text = data.text ?? "";
       const candidates = extractCandidateSequences(text);
-      const best = chooseBestSequence(words, candidates, freqMap);
+      const best = chooseBestSequence(words, candidates, freqMap, langUi().locale);
 
       if (!best) {
         el.screenStatus.textContent = "Nenhuma sequência válida neste frame…";
@@ -737,7 +780,7 @@ el.btnScreenStart.addEventListener("click", async () => {
     });
 
     const { createWorker } = await getTesseract();
-    screenWorker = await createWorker("por+eng", 1, {
+    screenWorker = await createWorker(langUi().ocrLanguages, 1, {
       logger: (m) => {
         if (m.status === "recognizing text" && typeof m.progress === "number") {
           el.screenOcrProgress.value = Math.round(m.progress * 100);

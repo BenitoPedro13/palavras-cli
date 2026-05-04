@@ -3,10 +3,14 @@
  * Mantém os mesmos limites e constantes para resultados consistentes.
  */
 
-export const WORDS_URL =
+export const WORDS_URL_PT =
   "https://raw.githubusercontent.com/pythonprobr/palavras/master/palavras.txt";
-export const FREQUENCY_URL =
+export const FREQUENCY_URL_PT =
   "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/pt/pt_full.txt";
+export const WORDS_URL_EN =
+  "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt";
+export const FREQUENCY_URL_EN =
+  "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_full.txt";
 
 export const MAX_RESULTS = 5;
 export const MAX_WORD_LENGTH = 15;
@@ -139,7 +143,7 @@ export function getCorpusFrequency(word, freqMap) {
   return freqMap.get(frequencyLookupKey(word)) ?? 0;
 }
 
-export function sortMatchesByLengthThenCorpus(matches, freqMap) {
+export function sortMatchesByLengthThenCorpus(matches, freqMap, locale = "pt-BR") {
   return [...matches].sort((a, b) => {
     const lenDiff = b.length - a.length;
     if (lenDiff !== 0) {
@@ -151,7 +155,7 @@ export function sortMatchesByLengthThenCorpus(matches, freqMap) {
       return freqDiff;
     }
 
-    return a.localeCompare(b, "pt-BR");
+    return a.localeCompare(b, locale);
   });
 }
 
@@ -190,13 +194,13 @@ function bucketMatchesByLengthTier(matches) {
   return buckets;
 }
 
-function sortMatchesByCorpusThenLocale(matches, freqMap) {
+function sortMatchesByCorpusThenLocale(matches, freqMap, locale = "pt-BR") {
   return [...matches].sort((a, b) => {
     const freqDiff = getCorpusFrequency(b, freqMap) - getCorpusFrequency(a, freqMap);
     if (freqDiff !== 0) {
       return freqDiff;
     }
-    return a.localeCompare(b, "pt-BR");
+    return a.localeCompare(b, locale);
   });
 }
 
@@ -228,7 +232,7 @@ function weightedRandomAmongTiers(nonEmptyTiers) {
   return nonEmptyTiers[nonEmptyTiers.length - 1];
 }
 
-export function pickPlayWordHumanTiered(matches, freqMap) {
+export function pickPlayWordHumanTiered(matches, freqMap, locale = "pt-BR") {
   if (matches.length === 1) {
     return { word: matches[0], tier: "medium" };
   }
@@ -238,12 +242,12 @@ export function pickPlayWordHumanTiered(matches, freqMap) {
   const nonEmpty = tierOrder.filter((t) => buckets[t].length > 0);
 
   const tier = nonEmpty.length === 1 ? nonEmpty[0] : weightedRandomAmongTiers(nonEmpty);
-  const ranked = sortMatchesByCorpusThenLocale(buckets[tier], freqMap);
+  const ranked = sortMatchesByCorpusThenLocale(buckets[tier], freqMap, locale);
 
   return { word: pickRandomFromCorpusWeightedPool(ranked, 5), tier };
 }
 
-export function findMatchingWords(words, sequence) {
+export function findMatchingWords(words, sequence, locale = "pt-BR") {
   const matches = [];
   const normalizedSequence = normalize(sequence);
 
@@ -261,7 +265,7 @@ export function findMatchingWords(words, sequence) {
     matches.push(word);
   }
 
-  return matches.sort((a, b) => b.length - a.length || a.localeCompare(b, "pt-BR"));
+  return matches.sort((a, b) => b.length - a.length || a.localeCompare(b, locale));
 }
 
 export function highlightSequence(word, sequence) {
@@ -289,17 +293,17 @@ export function extractCandidateSequences(text) {
   return [...unique];
 }
 
-export function chooseBestSequence(words, candidates, freqMap) {
+export function chooseBestSequence(words, candidates, freqMap, locale = "pt-BR") {
   let best = null;
   let bestScore = -1;
 
   for (const candidate of candidates) {
-    const matches = findMatchingWords(words, candidate);
+    const matches = findMatchingWords(words, candidate, locale);
     if (matches.length === 0) {
       continue;
     }
 
-    const topWord = sortMatchesByLengthThenCorpus(matches, freqMap)[0];
+    const topWord = sortMatchesByLengthThenCorpus(matches, freqMap, locale)[0];
     const freq = getCorpusFrequency(topWord, freqMap);
     const score =
       topWord.length * 1e15 +
@@ -329,35 +333,63 @@ export function chooseBestSequence(words, candidates, freqMap) {
  * }}
  */
 export function buildSearchPresentation(words, freqMap, sequence, options = {}) {
-  const matches = findMatchingWords(words, sequence);
+  const locale = options.locale ?? "pt-BR";
+  const lang = options.lang ?? "pt";
+  const freqCorpusShort =
+    options.freqCorpusShort ??
+    (lang === "en" ? "FrequencyWords / OpenSubtitles EN" : "FrequencyWords / legendas PT");
+  const scrabbleLabel =
+    options.scrabbleLabel ?? (lang === "en" ? "Scrabble (EN / international tiles)" : "Scrabble BR");
+
+  const matches = findMatchingWords(words, sequence, locale);
   const sequenceUpper = normalize(sequence);
 
   if (matches.length === 0) {
     return null;
   }
 
-  const sortedForPlay = sortMatchesByLengthThenCorpus(matches, freqMap);
+  const sortedForPlay = sortMatchesByLengthThenCorpus(matches, freqMap, locale);
 
   let pick;
   let criterionNote;
-  let tierPt;
+  let tierLabel;
 
   if (options.humanTierWordPick) {
-    const { word, tier } = pickPlayWordHumanTiered(matches, freqMap);
+    const { word, tier } = pickPlayWordHumanTiered(matches, freqMap, locale);
     pick = word;
-    tierPt =
-      tier === "short" ? "faixa curta" : tier === "medium" ? "faixa média" : "faixa longa";
-    criterionNote =
-      `modo OCR (mais natural): entre os comprimentos possíveis para esta sequência foi sorteada a ${tierPt}; ` +
-      `dentro dela, palavra aleatória entre as ~5 mais frequentes no corpus`;
+    if (lang === "en") {
+      tierLabel =
+        tier === "short" ? "short band" : tier === "medium" ? "medium band" : "long band";
+      criterionNote =
+        `OCR mode: picked a ${tierLabel} at random among possible lengths; ` +
+        `then a random word among the ~5 most frequent in the corpus`;
+    } else {
+      tierLabel =
+        tier === "short" ? "faixa curta" : tier === "medium" ? "faixa média" : "faixa longa";
+      criterionNote =
+        `modo OCR (mais natural): entre os comprimentos possíveis para esta sequência foi sorteada a ${tierLabel}; ` +
+        `dentro dela, palavra aleatória entre as ~5 mais frequentes no corpus`;
+    }
   } else {
     pick = sortedForPlay[0];
+    tierLabel = undefined;
     criterionNote =
-      "palavra mais longa no dicionário que contém a sequência; empate por uso no corpus — FrequencyWords / legendas PT";
+      lang === "en"
+        ? `longest dictionary word containing the sequence; ties by corpus — ${freqCorpusShort}`
+        : `palavra mais longa no dicionário que contém a sequência; empate por uso no corpus — ${freqCorpusShort}`;
   }
 
   const pickShown = normalize(pick);
   const pickFreq = getCorpusFrequency(pick, freqMap);
+
+  const freqLineFor = (f) =>
+    lang === "en"
+      ? f > 0
+        ? `~${f.toLocaleString(locale)} in corpus`
+        : "not in corpus"
+      : f > 0
+        ? `~${f.toLocaleString(locale)} no corpus`
+        : "fora do corpus";
 
   const restForPlay = sortedForPlay
     .filter((w) => w !== pick)
@@ -369,7 +401,7 @@ export function buildSearchPresentation(words, freqMap, sequence, options = {}) 
         shown: normalize(word),
         highlight: highlightSequence(word, sequenceUpper),
         len: word.length,
-        freqLabel: f > 0 ? `~${f.toLocaleString("pt-BR")} no corpus` : "fora do corpus",
+        freqLabel: freqLineFor(f),
       };
     });
 
@@ -379,7 +411,7 @@ export function buildSearchPresentation(words, freqMap, sequence, options = {}) 
       if (scoreDiff !== 0) {
         return scoreDiff;
       }
-      return a.localeCompare(b, "pt-BR");
+      return a.localeCompare(b, locale);
     })
     .slice(0, MAX_RESULTS)
     .map((word) => ({
@@ -396,10 +428,14 @@ export function buildSearchPresentation(words, freqMap, sequence, options = {}) 
     pickShown,
     pickWord: pick,
     pickFreq,
-    tier: tierPt,
+    tier: tierLabel,
     pickHighlight: highlightSequence(pick, sequenceUpper),
     pickLen: pick.length,
     restForPlay,
     highestPoints,
+    locale,
+    lang,
+    scrabbleLabel,
+    pickFreqLine: freqLineFor(pickFreq),
   };
 }
