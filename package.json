@@ -4,7 +4,8 @@
   "scripts": {
     "build": "tsc --noEmit",
     "start": "tsx index.ts",
-    "start:ocr": "tsx index.ts --ocr"
+    "start:ocr": "tsx index.ts --ocr",
+    "web": "bash scripts/run-web.sh"
   },
   "devDependencies": {
     "@types/node": "^22.19.17",
