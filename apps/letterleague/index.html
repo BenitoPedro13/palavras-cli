@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Letter League – Sugestor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              walnut: "#2a1a10",
+              walnut2: "#3d2914",
+              felt: "#0d5c2f",
+              felt2: "#0a4825",
+              tile: "#f0d491",
+              tileEdge: "#c9a04a",
+            },
+            boxShadow: {
+              "top-glow": "0 0 18px rgba(250, 204, 120, 0.85)",
+            },
+          },
+        },
+      };
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.0/tesseract.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.26.0/babel.min.js"></script>
+  </head>
+  <body class="min-h-screen bg-[#1f130a] text-stone-100">
+    <div id="root"></div>
+
+    <script type="text/babel" data-presets="react">
+      /* global React, ReactDOM */
+      const { useCallback, useEffect, useMemo, useRef, useState } = React;
+
+      const BOARD_N = 30;
+      const BOARD_LARGE = BOARD_N > 17;
+      const DICT_URL =
+        "https://raw.githubusercontent.com/benjamincrom/scrabble/master/scrabble/dictionary.json";
+
+      const LETTER_POINTS = {
+        A: 1,
+        B: 3,
+        C: 3,
+        D: 2,
+        E: 1,
+        F: 4,
+        G: 2,
+        H: 4,
+        I: 1,
+        J: 8,
+        K: 5,
+        L: 1,
+        M: 3,
+        N: 1,
+        O: 1,
+        P: 3,
+        Q: 10,
+        R: 1,
+        S: 1,
+        T: 1,
+        U: 1,
+        V: 4,
+        W: 4,
+        X: 8,
+        Y: 4,
+        Z: 10,
+        "?": 0,
+      };
+
+      /** Padrão bónus 15×15 estilo NASPA/US (repetido por quadrantes 15×15 quando o tabuleiro é maior). */
+      function buildNaspaBonus15() {
+        const sz = 15;
+        const g = Array.from({ length: sz }, () => Array(sz).fill(null));
+
+        /** @type {Array<[number,number,'2L'|'2W'|'3L'|'3W']>} */
+        const paint = [];
+
+        [
+          [0, 0],
+          [0, 7],
+          [0, 14],
+          [7, 0],
+          [7, 14],
+          [14, 0],
+          [14, 7],
+          [14, 14],
+        ].forEach(([r, c]) => paint.push([r, c, "3W"]));
+
+        [
+          [1, 1],
+          [2, 2],
+          [3, 3],
+          [4, 4],
+          [7, 7],
+          [10, 10],
+          [11, 11],
+          [12, 12],
+          [13, 13],
+          [1, 13],
+          [2, 12],
+          [3, 11],
+          [4, 10],
+          [10, 4],
+          [11, 3],
+          [12, 2],
+          [13, 1],
+        ].forEach(([r, c]) => paint.push([r, c, "2W"]));
+
+        [
+          [5, 1],
+          [5, 5],
+          [5, 9],
+          [5, 13],
+          [1, 5],
+          [1, 9],
+          [9, 1],
+          [9, 5],
+          [9, 9],
+          [9, 13],
+          [13, 5],
+          [13, 9],
+        ].forEach(([r, c]) => paint.push([r, c, "3L"]));
+
+        [
+          [0, 3],
+          [0, 11],
+          [14, 3],
+          [14, 11],
+          [2, 6],
+          [2, 8],
+          [12, 6],
+          [12, 8],
+          [3, 0],
+          [3, 7],
+          [3, 14],
+          [11, 0],
+          [11, 7],
+          [11, 14],
+          [6, 2],
+          [8, 2],
+          [6, 12],
+          [8, 12],
+          [7, 3],
+          [7, 11],
+          [6, 6],
+          [8, 8],
+          [6, 8],
+          [8, 6],
+        ].forEach(([r, c]) => paint.push([r, c, "2L"]));
+
+        const seen = new Set();
+        for (const [r, c, kind] of paint) {
+          const key = `${r},${c}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            g[r][c] = kind;
+          }
+        }
+        return g;
+      }
+
+      function buildBonusGrid() {
+        if (BOARD_N === 15) return buildNaspaBonus15();
+        const g = Array.from({ length: BOARD_N }, () => Array(BOARD_N).fill(null));
+        if (BOARD_N % 15 !== 0) return g;
+        const b15 = buildNaspaBonus15();
+        for (let qr = 0; qr < BOARD_N; qr += 15) {
+          for (let qc = 0; qc < BOARD_N; qc += 15) {
+            for (let r = 0; r < 15; r++) {
+              for (let c = 0; c < 15; c++) {
+                g[qr + r][qc + c] = b15[r][c];
+              }
+            }
+          }
+        }
+        return g;
+      }
+
+      const BONUS_GRID = buildBonusGrid();
+
+      /** Uma casa «estrela» (centro SCRABBLE por quadrante) por cada bloco 15×15. */
+      function openingStarsForSize(n) {
+        if (n % 15 === 0) {
+          const out = [];
+          for (let qr = 0; qr < n; qr += 15) {
+            for (let qc = 0; qc < n; qc += 15) {
+              out.push([qr + 7, qc + 7]);
+            }
+          }
+          return out;
+        }
+        const m = Math.floor((n - 1) / 2);
+        return [[m, m]];
+      }
+
+      function transposeGrid(matrix) {
+        const rows = matrix.length;
+        const cols = matrix[0]?.length ?? 0;
+        const out = Array.from({ length: cols }, () => Array(rows));
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) out[c][r] = matrix[r][c];
+        }
+        return out;
+      }
+
+      function cloneBoard(board) {
+        return board.map((row) => [...row]);
+      }
+
+      function parseRack(rackRaw) {
+        let blanks = 0;
+        const counts = {};
+        for (const ch of [...String(rackRaw).trim().toUpperCase()]) {
+          if (ch === "?" || ch === "*" || ch === ".") blanks++;
+          else if (ch >= "A" && ch <= "Z") counts[ch] = (counts[ch] ?? 0) + 1;
+        }
+        return { counts, blanks };
+      }
+
+      function cloneRack(state) {
+        return { counts: { ...state.counts }, blanks: state.blanks };
+      }
+
+      function addTrie(root, word) {
+        let node = root;
+        for (const ch of word) {
+          let next = node.next.get(ch);
+          if (!next) {
+            next = { end: false, next: new Map() };
+            node.next.set(ch, next);
+          }
+          node = next;
+        }
+        node.end = true;
+      }
+
+      function buildTrie(wordsIterable) {
+        const root = { end: false, next: new Map() };
+        for (const word of wordsIterable) addTrie(root, word);
+        return root;
+      }
+
+      function countOccupied(board) {
+        let n = 0;
+        for (let r = 0; r < board.length; r++) {
+          for (let c = 0; c < board[r].length; c++) if (board[r][c] !== ".") n++;
+        }
+        return n;
+      }
+
+      function collectMaximalWords(grid, rows, cols) {
+        const out = [];
+        for (let r = 0; r < rows; r++) {
+          let c = 0;
+          while (c < cols) {
+            if (grid[r][c] === ".") {
+              c++;
+              continue;
+            }
+            const cells = [];
+            let word = "";
+            while (c < cols && grid[r][c] !== ".") {
+              word += grid[r][c];
+              cells.push([r, c]);
+              c++;
+            }
+            if (word.length >= 2) out.push({ word, cells });
+          }
+        }
+        for (let c = 0; c < cols; c++) {
+          let r = 0;
+          while (r < rows) {
+            if (grid[r][c] === ".") {
+              r++;
+              continue;
+            }
+            const cells = [];
+            let word = "";
+            while (r < rows && grid[r][c] !== ".") {
+              word += grid[r][c];
+              cells.push([r, c]);
+              r++;
+            }
+            if (word.length >= 2) out.push({ word, cells });
+          }
+        }
+        return out;
+      }
+
+      function boardWordsLegal(grid, rows, cols, lex) {
+        for (const seg of collectMaximalWords(grid, rows, cols)) {
+          if (!lex.has(seg.word)) return false;
+        }
+        return true;
+      }
+
+      function touchesOld(boardBefore, rows, cols, placement) {
+        const dirs = [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ];
+        for (const [dr, dc] of dirs) {
+          const nr = placement.r + dr;
+          const nc = placement.c + dc;
+          if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+          if (boardBefore[nr][nc] !== ".") return true;
+        }
+        return false;
+      }
+
+      function playConnects(boardBefore, rows, cols, placements, hadTiles) {
+        if (!hadTiles) return true;
+        for (const p of placements) {
+          if (touchesOld(boardBefore, rows, cols, p)) return true;
+        }
+        return false;
+      }
+
+      function cellKey(rows, cols, r, c) {
+        void rows;
+        void cols;
+        return `${r},${c}`;
+      }
+
+      function applyPlacements(base, placements) {
+        const g = cloneBoard(base);
+        for (const p of placements) g[p.r][p.c] = p.letter;
+        return g;
+      }
+
+      function wordScore(cells, boardAfter, newCells, blanksOnBoard, bonus, points) {
+        let sum = 0;
+        let wm = 1;
+        for (const [r, c] of cells) {
+          const ch = boardAfter[r][c];
+          const k = `${r},${c}`;
+          const sq = bonus[r][c] ?? null;
+          const isNew = newCells.has(k);
+          const face = blanksOnBoard.has(k) ? 0 : points[ch] ?? 0;
+          let contrib = face;
+          if (isNew) {
+            const lm = sq === "2L" ? 2 : sq === "3L" ? 3 : 1;
+            contrib = face * lm;
+            wm *= sq === "2W" ? 2 : sq === "3W" ? 3 : 1;
+          }
+          sum += contrib;
+        }
+        return sum * wm;
+      }
+
+      function scorePlay(boardAfter, rows, cols, newCells, blanksOnBoard, bonusGrid, pointsMap, placementsCount) {
+        let total = 0;
+        for (const seg of collectMaximalWords(boardAfter, rows, cols)) {
+          if (!seg.cells.some(([r, c]) => newCells.has(`${r},${c}`))) continue;
+          total += wordScore(seg.cells, boardAfter, newCells, blanksOnBoard, bonusGrid, pointsMap);
+        }
+        if (placementsCount === 7) total += 50;
+        return total;
+      }
+
+      function finalizeHorizontalPlay(args) {
+        const { row, placements, cols, rows, lex, bonusGrid, pointsMap, boardBefore } = args;
+        if (!placements.length) return;
+
+        const merged = applyPlacements(boardBefore, placements);
+        let lo = Math.min(...placements.map((p) => p.c));
+        let hi = Math.max(...placements.map((p) => p.c));
+        if (placements.some((p) => p.r !== row)) return;
+
+        while (lo > 0 && merged[row][lo - 1] !== ".") lo--;
+        while (hi < cols - 1 && merged[row][hi + 1] !== ".") hi++;
+
+        for (const p of placements) {
+          if (p.c < lo || p.c > hi) return;
+        }
+
+        const wordSlice = merged[row].slice(lo, hi + 1).join("");
+        if (!lex.has(wordSlice)) return;
+
+        if (!args.hadTilesBefore) {
+          const stars = args.openingStars ?? [[Math.floor((rows - 1) / 2), Math.floor((cols - 1) / 2)]];
+          let coversStar = false;
+          for (const [cr, cc] of stars) {
+            const letter = merged[cr]?.[cc];
+            if (letter && letter !== ".") {
+              coversStar = true;
+              break;
+            }
+          }
+          if (!coversStar) return;
+        }
+
+        if (!playConnects(boardBefore, rows, cols, placements, args.hadTilesBefore)) return;
+        if (!boardWordsLegal(merged, rows, cols, lex)) return;
+
+        const newCells = new Set(placements.map((p) => cellKey(rows, cols, p.r, p.c)));
+        const blanks = new Set(placements.filter((p) => p.isBlank).map((p) => cellKey(rows, cols, p.r, p.c)));
+        const pts = scorePlay(merged, rows, cols, newCells, blanks, bonusGrid, pointsMap, placements.length);
+
+        const outCoords = args.mapOut(row, lo);
+        const key = `${args.direction}|${outCoords.row}|${outCoords.col}|${wordSlice}`;
+        const prev = args.dedupe.get(key);
+        const next = {
+          score: pts,
+          word: wordSlice,
+          direction: args.direction,
+          row: outCoords.row,
+          col: outCoords.col,
+          tilesPlaced: placements.length,
+        };
+        if (!prev || pts > prev.score) args.dedupe.set(key, next);
+      }
+
+      function enumerateHorizontalMoves(args) {
+        const { board, rows, cols, trie } = args;
+        const rackInit = cloneRack(parseRack(args.rackRaw));
+
+        function dfs(row, colWalk, node, rack, placements) {
+          if (colWalk >= cols) {
+            if (node.end && placements.length > 0) {
+              finalizeHorizontalPlay({
+                boardBefore: board,
+                row,
+                placements: [...placements],
+                cols,
+                rows,
+                lex: args.lex,
+                bonusGrid: args.bonusGrid,
+                pointsMap: args.pointsMap,
+                hadTilesBefore: args.hadTilesBefore,
+                openingStars: args.openingStars,
+                direction: args.direction,
+                mapOut: args.mapOut,
+                dedupe: args.dedupe,
+              });
+            }
+            return;
+          }
+
+          const cell = board[row][colWalk];
+
+          if (cell !== ".") {
+            const nx = node.next.get(cell);
+            if (!nx) return;
+            dfs(row, colWalk + 1, nx, rack, placements);
+            return;
+          }
+
+          if (node.end && placements.length > 0) {
+            finalizeHorizontalPlay({
+              boardBefore: board,
+              row,
+              placements: [...placements],
+              cols,
+              rows,
+              lex: args.lex,
+              bonusGrid: args.bonusGrid,
+              pointsMap: args.pointsMap,
+              hadTilesBefore: args.hadTilesBefore,
+              openingStars: args.openingStars,
+              direction: args.direction,
+              mapOut: args.mapOut,
+              dedupe: args.dedupe,
+            });
+          }
+
+          for (const [letter, nx] of node.next) {
+            const rk = cloneRack(rack);
+            let isBlank = false;
+            if ((rk.counts[letter] ?? 0) > 0) {
+              rk.counts[letter]--;
+            } else if (rk.blanks > 0) {
+              rk.blanks--;
+              isBlank = true;
+            } else continue;
+
+            placements.push({ r: row, c: colWalk, letter, isBlank });
+            dfs(row, colWalk + 1, nx, rk, placements);
+            placements.pop();
+          }
+        }
+
+        for (let row = 0; row < rows; row++) {
+          for (let c0 = 0; c0 < cols; c0++) {
+            if (c0 > 0 && board[row][c0 - 1] !== ".") continue;
+            dfs(row, c0, trie, rackInit, []);
+          }
+        }
+      }
+
+      function suggestPlays(boardDots, rackRaw, lex) {
+        const rows = boardDots.length;
+        const cols = boardDots[0].length;
+        const openingStarsH = openingStarsForSize(rows);
+        const openingStarsV = openingStarsH.map(([r, c]) => [c, r]);
+        const trie = buildTrie(lex.values());
+        const hadTilesBefore = countOccupied(boardDots) > 0;
+        const dedupe = new Map();
+
+        enumerateHorizontalMoves({
+          board: boardDots,
+          bonusGrid: BONUS_GRID,
+          pointsMap: LETTER_POINTS,
+          lex,
+          trie,
+          rackRaw,
+          hadTilesBefore,
+          dedupe,
+          direction: "H",
+          mapOut: (r, c) => ({ row: r, col: c }),
+          openingStars: openingStarsH,
+          rows,
+          cols,
+        });
+
+        const tBoard = transposeGrid(boardDots);
+        const tBonus = transposeGrid(BONUS_GRID);
+
+        enumerateHorizontalMoves({
+          board: tBoard,
+          bonusGrid: tBonus,
+          pointsMap: LETTER_POINTS,
+          lex,
+          trie,
+          rackRaw,
+          hadTilesBefore,
+          dedupe,
+          direction: "V",
+          mapOut: (tr, tc) => ({ row: tc, col: tr }),
+          openingStars: openingStarsV,
+          rows: cols,
+          cols: rows,
+        });
+
+        return [...dedupe.values()].sort((a, b) => b.score - a.score).slice(0, 40);
+      }
+
+      function buildLexicon(rawWords) {
+        const lenCap = BOARD_N;
+        const set = new Set();
+        for (const raw of rawWords) {
+          const key = String(raw).trim().toUpperCase();
+          if (key.length < 2 || key.length > lenCap || !/^[A-Z]+$/.test(key)) continue;
+          set.add(key);
+        }
+        return set;
+      }
+
+      /** @param {number} sx,sy,sw,sh crop in pixels on sourceImg canvas */
+      function preprocessCellSnippet(sourceCanvas, sx, sy, sw, sh, scaleMin = 3) {
+        const w = Math.max(24, Math.floor(sw * scaleMin));
+        const h = Math.max(24, Math.floor(sh * scaleMin));
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext("2d");
+        ctx.imageSmoothingEnabled = false;
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, w, h);
+        const img = ctx.getImageData(0, 0, w, h);
+        const data = img.data;
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          const lum = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+          sum += lum;
+        }
+        const avg = sum / ((data.length / 4) * 255 || 1);
+        const threshold = clamp(avg * 0.92, 120, 200);
+        for (let i = 0; i < data.length; i += 4) {
+          let lum = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+          lum = (lum - 128) * 1.85 + 128;
+          lum = lum < threshold ? 0 : 255;
+          data[i] = data[i + 1] = data[i + 2] = lum;
+        }
+        ctx.putImageData(img, 0, 0);
+        return c;
+      }
+
+      function clamp(n, lo, hi) {
+        return Math.max(lo, Math.min(hi, n));
+      }
+
+      function boardDotsFromGrid(grid) {
+        return grid.map((row) =>
+          row.map((ch) => {
+            const s = String(ch || "").trim().toUpperCase();
+            if (!s || s === ".") return ".";
+            if (s >= "A" && s <= "Z") return s;
+            return ".";
+          }),
+        );
+      }
+
+      function initialBoard() {
+        return Array.from({ length: BOARD_N }, () => Array.from({ length: BOARD_N }, () => ""));
+      }
+
+      /** @param {'2L'|'2W'|'3L'|'3W'|null} b */
+      function bonusClass(b) {
+        if (!b) return "bg-black/35 border-black/35";
+        if (b === "2L") return "bg-sky-800/95 border-sky-500/65";
+        if (b === "3L") return "bg-amber-700/92 border-amber-500/72";
+        if (b === "2W") return "bg-emerald-900/95 border-emerald-500/55";
+        if (b === "3W") return "bg-rose-900/95 border-rose-500/55";
+        return "";
+      }
+
+      function bonusLabel(b) {
+        if (b === "2L") return "2×L";
+        if (b === "3L") return "3×L";
+        if (b === "2W") return "2×P";
+        if (b === "3W") return "3×P";
+        return "";
+      }
+
+      function App() {
+        const [dictStatus, setDictStatus] = useState("loading");
+        const [lexRef, setLexRef] = useState(() => ({ lex: /** @type {Set<string>} */ (new Set()) }));
+
+        const [previewUrl, setPreviewUrl] = useState("");
+        const [imgNatural, setImgNatural] = useState({ w: 0, h: 0 });
+        const imgRef = useRef(null);
+        const imgNaturalRef = useRef({ w: 0, h: 0 });
+        /** `[ax, ay]` durante arrasto de recorte; `null` se inativo */
+        const dragAnchorRef = useRef(/** @type {null|[number,number]} */ (null));
+
+        /** @type {[number, number, number, number]} image pixels [sx,sy,sw,sh] */
+        const [crop, setCrop] = useState([0, 0, 1, 1]);
+        /** Pré-visualização do retângulo enquanto arrasta (`null` = não a arrastar) */
+        const [dragDraft, setDragDraft] = useState(/** @type {null|[number,number,number,number]} */ (null));
+        const [board, setBoard] = useState(initialBoard);
+
+        /** @type {string[]} */
+        const [rackSlots, setRackSlots] = useState(() => ["", "", "", "", "", "", ""]);
+
+        const [ocrProgress, setOcrProgress] = useState({ cur: 0, total: BOARD_N * BOARD_N });
+        const [scanning, setScanning] = useState(false);
+
+        /** @type {Array<{score:number;word:string;direction:string;row:number;col:number;tilesPlaced:number}>} */
+        const [results, setResults] = useState([]);
+        /** @type {number|null} */
+        const [selectedIx, setSelectedIx] = useState(null);
+
+        useEffect(() => {
+          fetch(DICT_URL)
+            .then((r) => r.json())
+            .then((data) => {
+              const lex = buildLexicon(data);
+              setLexRef({ lex });
+              setDictStatus(`ok (${lex.size.toLocaleString()} palavras)`);
+            })
+            .catch((e) => {
+              console.error(e);
+              setDictStatus("erro ao carregar lista");
+            });
+        }, []);
+
+        const onPickFile = (file) => {
+          if (!file) return;
+          const url = URL.createObjectURL(file);
+          setPreviewUrl((prev) => {
+            if (prev) URL.revokeObjectURL(prev);
+            return url;
+          });
+          setBoard(initialBoard());
+          setResults([]);
+          setSelectedIx(null);
+          dragAnchorRef.current = null;
+          setDragDraft(null);
+          setCrop([0, 0, 1, 1]);
+        };
+
+        useEffect(() => {
+          imgNaturalRef.current = imgNatural;
+        }, [imgNatural]);
+
+        const onImgLoaded = () => {
+          const el = imgRef.current;
+          if (!el) return;
+          const w = el.naturalWidth || 1;
+          const h = el.naturalHeight || 1;
+          setImgNatural({ w, h });
+          imgNaturalRef.current = { w, h };
+          setCrop([0, 0, w, h]);
+          dragAnchorRef.current = null;
+          setDragDraft(null);
+        };
+
+        /** Converte coords do cliente para pixels da imagem original */
+        function clientToImagePx(clientX, clientY, el, w, h) {
+          const rect = el.getBoundingClientRect();
+          const nx = clamp(((clientX - rect.left) / rect.width) * w, 0, w);
+          const ny = clamp(((clientY - rect.top) / rect.height) * h, 0, h);
+          return [nx, ny];
+        }
+
+        useEffect(() => {
+          function onMove(e) {
+            if (!dragAnchorRef.current || !imgRef.current) return;
+            const { w, h } = imgNaturalRef.current;
+            if (!w) return;
+            const el = imgRef.current;
+            const [ex, ey] = clientToImagePx(e.clientX, e.clientY, el, w, h);
+            const [ax, ay] = dragAnchorRef.current;
+            const x1 = clamp(Math.min(ax, ex), 0, w);
+            const y1 = clamp(Math.min(ay, ey), 0, h);
+            const x2 = clamp(Math.max(ax, ex), 0, w);
+            const y2 = clamp(Math.max(ay, ey), 0, h);
+            setDragDraft([x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1)]);
+          }
+
+          function onUp() {
+            if (!dragAnchorRef.current) return;
+            dragAnchorRef.current = null;
+            setDragDraft((draft) => {
+              if (draft && draft[2] > 8 && draft[3] > 8) setCrop(draft);
+              return null;
+            });
+          }
+
+          window.addEventListener("mousemove", onMove);
+          window.addEventListener("mouseup", onUp);
+          return () => {
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+          };
+        }, []);
+
+        const onMouseDownImage = (e) => {
+          const el = imgRef.current;
+          const { w, h } = imgNaturalRef.current;
+          if (!previewUrl || !el || !w) return;
+          const [sx, sy] = clientToImagePx(e.clientX, e.clientY, el, w, h);
+          dragAnchorRef.current = [sx, sy];
+          setDragDraft([sx, sy, 1, 1]);
+        };
+
+        const overlayRect = dragDraft ?? crop;
+
+        const overlayStyle = useMemo(() => {
+          if (!imgNatural.w || !previewUrl) return {};
+          const [sx, sy, sw, sh] = overlayRect;
+          return {
+            left: `${(sx / imgNatural.w) * 100}%`,
+            top: `${(sy / imgNatural.h) * 100}%`,
+            width: `${(sw / imgNatural.w) * 100}%`,
+            height: `${(sh / imgNatural.h) * 100}%`,
+          };
+        }, [crop, dragDraft, imgNatural.w, imgNatural.h, overlayRect, previewUrl]);
+
+        const scanBoard = useCallback(async () => {
+          const T = /** @type {any} */ (globalThis.Tesseract);
+          if (!previewUrl || !imgNatural.w || !T?.createWorker) {
+            alert("Sem imagem ou Tesseract CDN.");
+            return;
+          }
+          setScanning(true);
+          setOcrProgress({ cur: 0, total: BOARD_N * BOARD_N });
+          const imgEl = imgRef.current;
+          if (!imgEl) {
+            setScanning(false);
+            return;
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = imgNatural.w;
+          canvas.height = imgNatural.h;
+          const cx = canvas.getContext("2d");
+          if (!cx) {
+            setScanning(false);
+            return;
+          }
+          cx.drawImage(imgEl, 0, 0, imgNatural.w, imgNatural.h);
+
+          const [sx, sy, sw, sh] = crop;
+
+          let worker;
+          try {
+            worker = await T.createWorker("eng");
+            await worker.setParameters({
+              tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            });
+
+            let cellIx = 0;
+            const total = BOARD_N * BOARD_N;
+
+            for (let r = 0; r < BOARD_N; r++) {
+              for (let c = 0; c < BOARD_N; c++) {
+                cellIx++;
+                setOcrProgress({ cur: cellIx, total });
+                const gx = sx + (sw * c) / BOARD_N;
+                const gy = sy + (sh * r) / BOARD_N;
+                const gw = sw / BOARD_N;
+                const gh = sh / BOARD_N;
+
+                const cellCanvas = preprocessCellSnippet(canvas, gx, gy, gw, gh);
+
+                try {
+                  const { data } = await worker.recognize(cellCanvas);
+                  const txt = String(data?.text ?? "")
+                    .toUpperCase()
+                    .replace(/[^A-Z]/g, "");
+                  const confidence = typeof data?.confidence === "number" ? data.confidence : 0;
+                  const letter = txt.length && confidence >= 60 ? txt[0] : "";
+                  setBoard((prev) =>
+                    prev.map((row, ri) =>
+                      row.map((_ch, ci) => (ri === r && ci === c ? letter : prev[ri][ci])),
+                    ),
+                  );
+                } catch (_) {
+                  /* mantém letra já na célula */
+                }
+              }
+            }
+          } finally {
+            if (worker) await worker.terminate().catch(() => {});
+            setScanning(false);
+          }
+        }, [crop, imgNatural.w, previewUrl]);
+
+        const findWords = useCallback(() => {
+          const lex = lexRef.lex;
+          if (!lex || lex.size === 0) {
+            alert("Dicionário ainda não carregou.");
+            return;
+          }
+          const rackStr = rackSlots.map((ch) => (ch === " " ? "" : String(ch))).join("");
+          if (!rackStr.trim()) {
+            alert("Preenche as 7 letras do rack.");
+            return;
+          }
+          const dotted = boardDotsFromGrid(board);
+          const plays = suggestPlays(dotted, rackStr.toUpperCase(), lex);
+          setResults(plays);
+          setSelectedIx(plays.length ? 0 : null);
+        }, [board, lexRef.lex, rackSlots]);
+
+        /** @returns {null|[[number,number][]]} highlighted cells when a play chosen */
+        const highlightCells = useMemo(() => {
+          const play = selectedIx != null ? results[selectedIx] : null;
+          if (!play) return null;
+          const cells = [];
+          const { row, col, direction, word } = play;
+          for (let i = 0; i < word.length; i++) {
+            cells.push(direction === "H" ? [row, col + i] : [row + i, col]);
+          }
+          return cells;
+        }, [results, selectedIx]);
+
+        const setTile = (r, c, raw) => {
+          const upper = raw.toUpperCase().replace(/[^A-Z]/g, "");
+          const ch = upper.slice(-1); // último car válido ao digitar
+          setBoard((prev) =>
+            prev.map((row, ri) => row.map((cell, ci) => (ri === r && ci === c ? ch : cell))),
+          );
+        };
+
+        const setRack = (ix, raw) => {
+          const cleaned = raw.toUpperCase().replace(/[^A-Z?]/g, "");
+          const ch = cleaned.slice(-1) ?? "";
+          setRackSlots((prev) => prev.map((v, i) => (i === ix ? ch : v)));
+        };
+
+        const resetCropFull = () => {
+          const { w, h } = imgNatural;
+          if (w && h) setCrop([0, 0, w, h]);
+        };
+
+        return (
+          <div
+            className="min-h-screen"
+            style={{
+              backgroundImage: "linear-gradient(140deg,#1a1008 0%,#3d2914 40%,#1f140b 100%)",
+            }}>
+            <header className="border-b border-amber-900/40 px-4 py-3">
+              <h1 className="text-xl font-semibold tracking-tight text-amber-100">
+                Sugestor Letter League
+              </h1>
+              <p className="text-xs text-stone-400">
+                Lista: {dictStatus}. Tesseract CDN (offline da API). Usa OCR célula a célula (correções no
+                centro).
+              </p>
+            </header>
+
+            <main className="mx-auto grid max-w-[1480px] grid-cols-1 gap-3 p-3 lg:grid-cols-[320px,minmax(0,1fr),320px]">
+              {/* Left */}
+              <section className="rounded-xl border border-amber-900/40 bg-walnut2/92 p-3 shadow-xl">
+                <h2 className="mb-2 text-sm font-semibold text-amber-200">Imagem</h2>
+
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const f = e.dataTransfer.files?.[0];
+                    if (f) onPickFile(f);
+                  }}
+                  className="flex flex-col gap-3">
+                  <label className="flex cursor-pointer flex-col items-center rounded-lg border-2 border-dashed border-stone-500/60 px-4 py-6 text-xs text-stone-300 hover:border-amber-500/65">
+                    <span>Soltar PNG/JPG aqui ou clicar para escolher</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) onPickFile(f);
+                      }}
+                    />
+                  </label>
+
+                  {previewUrl && (
+                    <>
+                      <div className="relative inline-block select-none">
+                        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+                        <img
+                          ref={imgRef}
+                          src={previewUrl}
+                          alt="Captura Letter League"
+                          className="max-h-[460px] w-full cursor-crosshair rounded border border-black/55 object-contain"
+                          onMouseDown={onMouseDownImage}
+                          onLoad={onImgLoaded}
+                        />
+                        <div
+                          className="pointer-events-none absolute rounded border border-amber-200/95 bg-amber-300/22"
+                          style={overlayStyle}
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-stone-300">
+                        <button
+                          type="button"
+                          onClick={resetCropFull}
+                          className="rounded bg-stone-800 px-3 py-1 text-stone-100 hover:bg-stone-700">
+                          Recorte = imagem toda
+                        </button>
+                        <span>{`Área atual: ${Math.round(crop[2])}×${Math.round(crop[3])}px`}</span>
+                      </div>
+                      <p className="text-[11px] text-stone-500">
+                        {`Arrastar na pré-visualização para desenhar o recorte (${BOARD_N}×${BOARD_N}).`}
+                      </p>
+                    </>
+                  )}
+
+                  <button
+                    type="button"
+                    disabled={scanning || !previewUrl}
+                    onClick={() => scanBoard()}
+                    className="rounded-lg bg-emerald-800 px-3 py-2 text-sm font-medium text-emerald-50 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">
+                    {scanning ? "Digitalizando..." : "Digitalizar tabuleiro"}
+                  </button>
+                  <div className="h-2 w-full rounded bg-black/50">
+                    <div
+                      className="h-2 rounded bg-amber-500 transition-[width]"
+                      style={{ width: scanning ? `${(ocrProgress.cur / Math.max(1, ocrProgress.total)) * 100}%` : "0%" }}
+                    />
+                  </div>
+                  <p className="text-[11px] text-stone-400">
+                    {scanning ? `OCR: ${ocrProgress.cur} de ${ocrProgress.total}` : "Idle"}
+                  </p>
+                </div>
+              </section>
+
+              {/* Center board */}
+              <section className="rounded-xl border border-felt bg-felt px-4 py-4 shadow-2xl">
+                <div className={`mx-auto mb-3 flex max-w-none items-center justify-between gap-3 ${BOARD_LARGE ? "flex-col lg:flex-row" : ""}`}>
+                  <h2 className="text-sm font-semibold text-emerald-100">
+                    Tabuleiro {BOARD_N}×{BOARD_N}
+                  </h2>
+                  <span className="text-[11px] text-emerald-200/80">
+                    {BOARD_LARGE ? "Legendas só no título • " : ""} azul = 2×L | ouro = 3×L | verde = 2×P | vermelho = 3×P
+                  </span>
+                </div>
+                <div
+                  className={`mx-auto grid select-none p-4 ${BOARD_LARGE ? "gap-0.5 min-w-0 max-w-[min(98vw,1200px)]" : "max-w-[720px] gap-1"}`}
+                  style={{ gridTemplateColumns: `repeat(${BOARD_N},minmax(0,1fr))` }}>
+                  {board.map((row, r) =>
+                    row.map((cell, c) => {
+                      const bonus = BONUS_GRID[r][c];
+                      const hi = highlightCells?.some(([rr, cc]) => rr === r && cc === c);
+                      return (
+                        <div
+                          key={`${r}-${c}`}
+                          className={`relative flex aspect-square flex-col rounded-sm border shadow-inner shadow-black/30 ${bonusClass(bonus)}`}>
+                          {!BOARD_LARGE ? (
+                          <span className="pointer-events-none absolute left-[2px] top-[2px] text-[7px] font-semibold text-white/40">
+                            {bonusLabel(bonus)}
+                          </span>
+                          ) : null}
+
+                          {/* eslint-disable jsx-a11y/no-autofocus */}
+                          <input
+                            aria-label={`célula ${r + 1},${c + 1}`}
+                            title={`${r + 1},${c + 1}`}
+                            value={cell}
+                            maxLength={1}
+                            onChange={(e) => setTile(r, c, e.target.value)}
+                            className={[
+                              "relative z-[1] rounded-sm border uppercase text-stone-900 outline-none caret-stone-800",
+                              BOARD_LARGE
+                                ? "m-px min-h-[1.125rem] h-[calc(100%-3px)] w-[calc(100%-3px)] px-0 text-center text-[10px] font-semibold leading-none"
+                                : "m-[2px] h-[calc(100%-4px)] w-[calc(100%-4px)] px-1 text-lg font-semibold",
+                              "border-tileEdge/90 bg-[linear-gradient(160deg,#f7e9b9,#eabf72)] shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] focus:ring-2 focus:ring-amber-300",
+                              hi ? (BOARD_LARGE ? "ring-[2px] ring-amber-200" : "ring-[3px] ring-amber-200") : "",
+                            ].join(" ")}
+                            placeholder=""
+                          />
+
+                          {cell && LETTER_POINTS[cell] != null && (
+                            <span
+                              className={`pointer-events-none absolute z-[2] translate-y-[1px] align-super font-bold leading-none text-stone-800 ${
+                                BOARD_LARGE ? "bottom-px right-0.5 text-[6px]" : "bottom-[2px] right-[6px] text-[9px]"
+                              }`}>
+                              <sup>{LETTER_POINTS[cell] ?? 0}</sup>
+                            </span>
+                          )}
+                        </div>
+                      );
+                    }),
+                  )}
+                </div>
+              </section>
+
+              {/* Right */}
+              <section className="rounded-xl border border-amber-900/40 bg-walnut2/94 p-3 shadow-xl">
+                <h2 className="mb-2 text-sm font-semibold text-amber-200">Amostra</h2>
+
+                <div className="mb-3 grid grid-cols-7 gap-1">
+                  {rackSlots.map((ch, ix) => (
+                    <label key={`rack-${ix}`} className="flex flex-col text-[10px] text-stone-400">
+                      #{ix + 1}
+                      <input
+                        value={ch}
+                        maxLength={1}
+                        onChange={(e) => setRack(ix, e.target.value)}
+                        className="mt-1 h-11 rounded border border-tileEdge bg-tile text-center text-lg font-bold uppercase text-stone-900 outline-none shadow-inner shadow-black/20 focus:border-amber-200"
+                      />
+                    </label>
+                  ))}
+                </div>
+
+                <p className="mb-2 text-[11px] text-stone-400">Usa «?» para wildcard (0 pts).</p>
+
+                <button
+                  type="button"
+                  onClick={findWords}
+                  disabled={scanning || dictStatus.startsWith("erro")}
+                  className="mb-4 w-full rounded-lg bg-gradient-to-br from-emerald-800 to-green-950 px-3 py-2 text-sm font-semibold text-emerald-50 hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40">
+                  Encontrar palavras
+                </button>
+
+                <div className="space-y-1">
+                  <h3 className="text-[11px] font-semibold text-amber-200/90">Melhores 40 jogadas</h3>
+
+                  {!results.length && (
+                    <p className="text-[11px] text-stone-500">
+                      Corre «Encontrar palavras» para ver pontuações, orientação H/V e posição inicial.
+                    </p>
+                  )}
+
+                  <ol className="max-h-[55vh] space-y-1 overflow-auto pr-1">
+                    {results.map((play, ix) => {
+                      const isTop = ix === 0;
+
+                      const base =
+                        "w-full rounded border px-2 py-[6px] text-left transition bg-[rgba(54,42,34,0.85)] ";
+
+                      const topCls =
+                        "border border-amber-300/95 bg-[rgba(118,93,72,1)] outline outline-amber-200/95 shadow-[0_0_20px_rgba(250,204,120,0.55)] ";
+
+                      const restCls =
+                        "border-transparent hover:bg-[rgba(66,53,43,1)] ";
+
+                      const cls =
+                        `${base}${isTop ? topCls : restCls}` +
+                        `${selectedIx === ix ? " ring-2 ring-amber-200" : ""}`;
+
+                      const labelDir = play.direction === "H" ? "H" : "V";
+
+                      return (
+                        <li key={`${labelDir}-${play.row}-${play.col}-${play.word}-${ix}`} className="">
+                          <button type="button" className={cls} onClick={() => setSelectedIx(ix)}>
+                            <div className="flex items-start justify-between gap-2">
+                              <span className="text-[10px] text-stone-400">#{ix + 1}</span>
+
+                              <span className={`text-xl font-semibold tracking-tight text-amber-200 ${isTop ? "drop-shadow-[0_0_6px_rgba(250,235,179,0.75)]" : ""}`}>{play.score}</span>
+                            </div>
+
+                            <div className="text-sm font-semibold text-stone-100">{play.word}</div>
+                            <div className="text-[11px] text-stone-400">
+                              {`(${play.row + 1},${play.col + 1}) ${labelDir} · fichas ${play.tilesPlaced}`}
+
+                            </div>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ol>
+
+                </div>
+              </section>
+            </main>
+          </div>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+    </script>
+  </body>
+</html>
